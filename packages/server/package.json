@@ -1,0 +1,16 @@
+{
+  "name": "@olive/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "olive-server": "./src/index.ts"
+  },
+  "dependencies": {
+    "@olive/shared": "workspace:*",
+    "hono": "^4.13.1",
+    "kysely": "^0.28.17",
+    "kysely-bun-sqlite": "^0.4.0",
+    "zod": "^4.4.3"
+  }
+}

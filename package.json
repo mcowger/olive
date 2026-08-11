@@ -1,0 +1,25 @@
+{
+  "name": "olive",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "build": "bun run build:web",
+    "build:web": "bun run packages/web/build.ts",
+    "dev": "bun run packages/server/src/index.ts",
+    "dev:web": "bun run packages/web/dev.ts",
+    "start": "bun run packages/server/src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json && tsc --noEmit -p packages/web/tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.8.3"
+  }
+}

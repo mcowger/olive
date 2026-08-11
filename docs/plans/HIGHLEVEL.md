@@ -14,7 +14,7 @@ Status: planning locked, nothing built yet.
 
 ## Locked decisions
 
-1. **No paid tier, no n8n.** Everything self-hosted; Obsidian is the primary destination.
+1. **No paid tier, no n8n.** Everything self-hosted; Obsidian is the primary destination (deferred to v2; MVP relies on local disk and webhooks).
 2. **Plaud ingestion via the official documented API** (docs.plaud.ai), replacing the fork's cookie/session scraping.
 3. **Speechmatics** (batch) handles ALL raw-audio transcription: STT + within-file diarization + **cross-recording speaker identification** (voiceprint enrollment — confirmed supported in batch + realtime). ~$0.0067/min. Privacy is not a concern; delete audio from their 7-day retention after ingest as hygiene.
 4. **Summaries + auto-tagging via a pluggable LLM** (Anthropic/OpenAI/Ollama to start) — Speechmatics' own summaries not relied upon.
@@ -29,7 +29,9 @@ Status: planning locked, nothing built yet.
 - Documented REST API at `https://platform.plaud.ai/developer/api`, OAuth-based; official `@plaud-ai/cli` (`npm i -g @plaud-ai/cli`) with auto-managed tokens at `~/.plaud/tokens.json`; env overrides (`PLAUD_CLIENT_ID`, `PLAUD_CLIENT_SECRET`, …) imply custom OAuth clients are supportable.
 - Data surface: `list_files` (filters, pagination), `get_file` → `presigned_url` (24h audio), `source_list` (transcript segments w/ timestamps + speaker labels), `note_list` (AI summaries, markdown).
 - **Feasibility confirmed** — OAuth 2.0 + PKCE works for individuals via the same client flow the official CLI uses. Our own `@mcowger/plaud-client` (published on npm) already implements: PKCE login (loopback :8199 + headless paste-code flow), token persistence at `~/.plaud/tokens.json` (0600), proactive 48h auto-refresh, paginated listing with date filters, `getFile` (presigned audio + transcript segments + AI notes), error taxonomy with backoff, and **formatters (Markdown/SRT/text with speaker labels + timestamps, full note-doc generation)**. This is the Plaud layer for the new project.
-- Requires Plaud Cloud Sync (PCS) enabled on the account. Official `plaud` CLI remains a debugging tool, not an integration path.
+- **Plaud API Stability Risk (Accepted):** The project impersonates the official Plaud CLI OAuth client. If Plaud blocks this or enforces app attestation, ingestion breaks. We accept this external dependency risk.
+- **Storage Lifecycle (Deferred):** MVP will not prune audio files; storage lifecycle management is deferred to a later date.
+- **Cost Control:** We trust the user not to upload massive garbage audio. No local VAD or duration capping is built into the MVP to prevent runaway Speechmatics costs.
 
 ### Speechmatics
 - **Speaker Identification** (docs.speechmatics.com/speech-to-text/features/speaker-identification): enroll 5–30s solo clips → string voice identifiers; pass `speaker_diarization_config.speakers = [{label, speaker_identifiers}]` on every job → transcripts come back named persistently across recordings. Also improves diarization accuracy. Batch + realtime.
@@ -38,8 +40,9 @@ Status: planning locked, nothing built yet.
 
 ### Apple Voice Memos
 - iOS Shortcuts `Get Contents of URL` does multipart file POSTs with Bearer headers — proven pattern.
-- iOS quirk: m4a uploads tagged `audio/x-m4a` (accept it); form file field must be type File with exact key name server expects.
+- iOS quirk: m4a uploads tagged `audio/x-m4a` (accept it); form file field must be type File with exact key name server expects. Voice Memos natively produces `m4a` (AAC or ALAC), which Speechmatics supports natively. We pass the raw bytes directly without ffmpeg normalization.
 - No "new voice memo" automation trigger exists on iOS → share-sheet is max automation, one tap.
+- **Accepted MVP Tradeoff:** Shortcuts are fragile for large background uploads. If an upload fails mid-flight, the user receives a generic error and must manually retry. Resumable chunked uploads or companion apps are out of scope for MVP.
 - Voice Memos supports Edit → multi-select → Share → one shortcut handles single memos AND library backfill.
 - Dormant option (if a Mac enters the loop later): `~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings/` + `CloudRecordings.db` (table `ZCLOUDRECORDING`: `ZUNIQUEID`, `ZENCRYPTEDTITLE`, `ZDATE`+978307200, `ZPATH`, `ZEVICTIONDATE`; needs Full Disk Access; handle ~3KB iCloud placeholder stubs; read DB read-only/copy-to-temp). Newer memos embed Apple's own transcript in a `tsrp` atom — free fallback, no speakers. Not part of the plan per Decision 5.
 
@@ -85,8 +88,9 @@ web UI upload              ── audio artifact                             ─
 - **Uniform model:** one `sources → ingest → stages → destinations` pipeline; every meeting gets an on-disk folder (fork-derived layout, now per-meeting): `<meetings>/<YYYY-MM-DD_title__meetingId8>/` containing `audio/`, `transcripts/<provider>.{json,txt}`, `summaries/<provider>.md`. Blob bytes live on disk; metadata + relationships live in SQLite.
 - Plaud audio optionally *re-run through Speechmatics* for automatic voiceprint-based naming — only when Plaud labels came back generic (`Speaker N`); Plaud speakers identified in the Plaud app already carry real names through the API. Trigger: `retranscribePlaudWhenUnnamed` config, OR no Plaud transcript artifact exists. Plaud's own transcript/summary artifacts are always retained regardless.
 - **Speaker registry:** SQLite table (name, provider voiceprint identifiers — e.g. Speechmatics `speaker_identifiers[]`, enrolled_at); attached to every Speechmatics job; backfill step renames speakers in past transcripts on enrollment.
-- Auth: server binds beyond loopback; **new Bearer-token middleware** on all `/api/*` when not loopback-bound (the fork has an unused `lanToken` config field — implement the enforcement it implies). Same-LAN out of the box; off-LAN via Tailscale.
-- **Obsidian write-path:** default = direct vault file write (server needs fs visibility into the vault — same host or sync mount) with **stable `file_id` frontmatter → idempotent upserts** and folder split `Notes/` + `Audio/`, filename pattern `{date}-{title}` (conventions per ecosystem survey). Alternative = Obsidian Local REST API plugin when the server can't touch the vault filesystem; requires Obsidian running.
+- **Artifact Immutability (MVP):** The UI is strictly read-only for MVP. There is no editing of transcripts or manual fixing of speakers, preserving artifact provenance.
+- **Data Durability:** Backups for the SQLite database are considered out of scope for MVP.
+- **Obsidian write-path (Deferred to v2):** default = direct vault file write (server needs fs visibility into the vault — same host or sync mount) with **stable `file_id` frontmatter → idempotent upserts** and folder split `Notes/` + `Audio/`, filename pattern `{date}-{title}` (conventions per ecosystem survey). Alternative = Obsidian Local REST API plugin when the server can't touch the vault filesystem; requires Obsidian running.
 
 ### Provider interfaces (Decision 7)
 
@@ -125,7 +129,7 @@ Recording      { id, meetingId, path, mime, durationMs, sha256 }          // aud
 Artifact       { id, meetingId, recordingId?, kind: 'transcript'|'summary',
                  provider: 'plaud'|'speechmatics'|'apple-tsrp'|'llm:*', format: 'md'|'txt'|'json',
                  path, createdAt }                                          // provenance on every row
-Speaker        { id, name, providerIds: { speechmatics?: string[] }, enrolledAt }   // voiceprint vectors/IDs
+Speaker        { id, name, providerIds: { speechmatics?: string[] }, enrolledAt, enrollmentClipPaths: string[] }   // voiceprint vectors/IDs, keep raw clips for provider migration
 MeetingSpeaker { meetingId, speakerId, evidenceArtifactId }               // who was in which meeting
 Export         = f(Meeting + Artifacts + Speakers + Tags)  → Obsidian note / webhook payload
 ```
@@ -147,12 +151,12 @@ Export         = f(Meeting + Artifacts + Speakers + Tags)  → Obsidian note / w
 
 | # | Item | Size | Notes |
 |---|------|------|-------|
-| 1 | **Plaud official-API layer** | S | Adopt/depend on `@mcowger/plaud-client` (OAuth PKCE ✓, refresh ✓, formatters ✓ — see Ecosystem). Poller creates **Meetings** and ingests all available artifacts: audio + Plaud transcript + Plaud summary (never discard). Verify PCS enabled on account during first login test. |
+| 1 | **Plaud official-API layer** | S | Adopt/depend on `@mcowger/plaud-client` (OAuth PKCE ✓, refresh ✓, formatters ✓ — see Ecosystem). Poller creates **Meetings** and ingests all available artifacts. **Crucially, polling waits for the Plaud server-side transcript and summary to finish generating before ingesting the meeting. If generation times out (e.g., >24h), it falls back to ingesting just the audio.** Verify PCS enabled on account during first login test. |
 | 2 | **`/api/ingest` + token middleware + iOS Shortcut recipe** | S–M | Multipart, m4a/aac/mp3/wav/ogg, sha256 dedupe, Bearer auth, bind-config enforcement. Shortcut: share-sheet → loop → Form POST. Until step 3 exists, uploads just land on disk. |
 | 3 | **Speechmatics pipeline** | M | First `TranscriptionProvider` + `SpeakerIdentityProvider` implementations behind the Decision-7 interfaces. Batch jobs + Notifications webhook completion (not polling); speaker registry attached; 7-day-retention delete-after-ingest; transcription for all raw-audio sources. Long-audio: chunking or fetch-URL >1GB (open-plaud's chunk pattern). Stage flags decoupled per open-plaud (`state`-tracked, retryable per stage). |
 | 4 | **Speaker registry UI + enrollment/backfill** | S–M | Enroll from 5–30s clip; rename-in-history on enrollment; unknown-speaker surfacing in UI. |
 | 5 | **LLM summary/tag stage** | S | First `LLMProvider` implementations (one OpenAI-compatible adapter covers OpenRouter/Ollama/LM Studio; Anthropic separate). Provider/model/prompt in settings; runs on final canonical transcript; emits summary md + tags[]. |
-| 6 | **Obsidian destination** | S | Export = pure function of Meeting aggregate: one note per meeting, YAML frontmatter (date/duration/source/speakers/tags/**file_id = meeting id**) + primary summary + primary transcript + audio link; idempotent upsert keyed on `file_id`. Fork groundwork reusable: filename sanitizer already Obsidian-safe. |
+| 6 | **Obsidian destination (v2)** | S | Export = pure function of Meeting aggregate: one note per meeting, YAML frontmatter (date/duration/source/speakers/tags/**file_id = meeting id**) + primary summary + primary transcript + audio link; idempotent upsert keyed on `file_id`. Fork groundwork reusable: filename sanitizer already Obsidian-safe. |
 
 ## Non-goals
 

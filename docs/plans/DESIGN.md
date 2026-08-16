@@ -10,7 +10,7 @@ The one real dependency is `@mcowger/plaud-client` (npm, published, MIT-equivale
 `packages/plaud-client` source at `~/workspace/plaud-client`), used as-is for OAuth/API/formatters.
 Its exact surface (verified against source, not guessed) is documented in M1a below.
 
-Out of scope for this doc: M5 (Obsidian) and all `HIGHLEVEL.md` non-goals.
+Out of scope for this doc: all `HIGHLEVEL.md` non-goals.
 
 ---
 
@@ -516,7 +516,7 @@ per your env), summary+tags artifacts written with correct provenance; provider-
 
 ## 14. Explicit non-scope reminders
 
-No Obsidian export (M5), no multi-user auth beyond the two bearer tokens above, no LAN/Tailscale
+No multi-user auth beyond the two bearer tokens above, no LAN/Tailscale
 exposure work, no Docker/CI publishing beyond what M0 scaffolds, no editing/fixing transcripts in
 the UI (Artifact Immutability), no SQLite backups. If implementation surfaces a need for any of
 these, stop and flag rather than building it.

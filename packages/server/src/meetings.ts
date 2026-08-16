@@ -1,5 +1,19 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Kysely } from "kysely";
-import type { Database, MeetingListItem, MeetingRow } from "@olive/shared";
+import type {
+  Artifact,
+  ArtifactRow,
+  Database,
+  MeetingListItem,
+  MeetingRow,
+  Recording,
+  RecordingRow,
+  Speaker,
+  SpeakerRow,
+  StageRunRow
+} from "@olive/shared";
+import { meetingPaths } from "./layout.ts";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -19,12 +33,31 @@ export interface MeetingListResponse {
   };
 }
 
+export interface MeetingDetailResponse {
+  meeting: MeetingListItem;
+  recordings: Recording[];
+  artifacts: Artifact[];
+  speakers: Speaker[];
+  stageRuns: StageRunRow[];
+  transcriptContent?: string | null;
+  summaryContent?: string | null;
+}
+
 function parseTags(value: string): string[] {
   try {
     const parsed: unknown = JSON.parse(value);
     return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+function parseJsonField<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
   }
 }
 
@@ -42,6 +75,45 @@ function toMeeting(row: MeetingRow): MeetingListItem {
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function toRecording(row: RecordingRow): Recording {
+  return {
+    id: row.id,
+    meetingId: row.meeting_id,
+    path: row.path,
+    mime: row.mime,
+    durationMs: row.duration_ms,
+    sizeBytes: row.size_bytes,
+    sha256: row.sha256,
+    provider: row.provider,
+    providerRecordingId: row.provider_recording_id,
+    createdAt: row.created_at
+  };
+}
+
+function toArtifact(row: ArtifactRow): Artifact {
+  return {
+    id: row.id,
+    meetingId: row.meeting_id,
+    recordingId: row.recording_id,
+    kind: row.kind,
+    provider: row.provider,
+    format: row.format,
+    path: row.path,
+    createdAt: row.created_at
+  };
+}
+
+function toSpeaker(row: SpeakerRow): Speaker {
+  return {
+    id: row.id,
+    name: row.name,
+    providerIds: parseJsonField<Record<string, string[]>>(row.provider_ids, {}),
+    enrolledAt: row.enrolled_at,
+    enrollmentClipPaths: parseJsonField<string[]>(row.enrollment_clip_paths, []),
+    createdAt: row.created_at
   };
 }
 
@@ -80,5 +152,69 @@ export async function listMeetings(
       offset,
       total: Number(totalRow.count)
     }
+  };
+}
+
+export async function getMeeting(
+  db: Kysely<Database>,
+  id: string,
+  meetingsDir?: string
+): Promise<MeetingDetailResponse | null> {
+  const meetingRow = await db
+    .selectFrom("meetings")
+    .selectAll()
+    .where("id", "=", id)
+    .executeTakeFirst();
+
+  if (!meetingRow) {
+    return null;
+  }
+
+  const [recordingRows, artifactRows, meetingSpeakerRows, stageRuns] = await Promise.all([
+    db.selectFrom("recordings").selectAll().where("meeting_id", "=", id).orderBy("created_at", "asc").execute(),
+    db.selectFrom("artifacts").selectAll().where("meeting_id", "=", id).orderBy("created_at", "asc").execute(),
+    db.selectFrom("meeting_speakers").selectAll().where("meeting_id", "=", id).execute(),
+    db.selectFrom("stage_runs").selectAll().where("meeting_id", "=", id).orderBy("created_at", "asc").execute()
+  ]);
+
+  const speakerIds = meetingSpeakerRows.map((ms) => ms.speaker_id);
+  const speakerRows =
+    speakerIds.length > 0
+      ? await db.selectFrom("speakers").selectAll().where("id", "in", speakerIds).execute()
+      : [];
+
+  let transcriptContent: string | null = null;
+  let summaryContent: string | null = null;
+
+  if (meetingsDir) {
+    const folder = meetingPaths(meetingsDir, meetingRow.start_time, meetingRow.title, meetingRow.id).folder;
+
+    const primaryTranscript = artifactRows.find((a) => a.id === meetingRow.primary_transcript_artifact_id);
+    if (primaryTranscript) {
+      try {
+        transcriptContent = await readFile(join(folder, primaryTranscript.path), "utf8");
+      } catch {
+        // file unreadable or not on disk yet
+      }
+    }
+
+    const primarySummary = artifactRows.find((a) => a.id === meetingRow.primary_summary_artifact_id);
+    if (primarySummary) {
+      try {
+        summaryContent = await readFile(join(folder, primarySummary.path), "utf8");
+      } catch {
+        // file unreadable or not on disk yet
+      }
+    }
+  }
+
+  return {
+    meeting: toMeeting(meetingRow),
+    recordings: recordingRows.map((r) => toRecording(r)),
+    artifacts: artifactRows.map((a) => toArtifact(a)),
+    speakers: speakerRows.map((s) => toSpeaker(s)),
+    stageRuns,
+    transcriptContent,
+    summaryContent
   };
 }

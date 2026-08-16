@@ -88,3 +88,31 @@ export const syncStateSchema = z.object({
   key: z.string(),
   value: z.string()
 });
+
+export const transcriptWordSchema = z.object({
+  startMs: z.number().int(),
+  endMs: z.number().int(),
+  word: z.string(),
+  confidence: z.number().optional(),
+  speaker: z.string().optional()
+});
+
+export const transcriptSegmentSchema = z.object({
+  startMs: z.number().int(),
+  endMs: z.number().int(),
+  speaker: z.string(),
+  text: z.string(),
+  words: z.array(transcriptWordSchema).optional()
+});
+
+export const transcriptSchema = z.object({
+  segments: z.array(transcriptSegmentSchema),
+  language: z.string().optional(),
+  durationMs: z.number().int().optional()
+});
+
+export const enrolledSpeakerSchema = z.object({
+  id: idSchema,
+  name: z.string(),
+  providerIds: z.record(z.string(), z.array(z.string()))
+});

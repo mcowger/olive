@@ -169,4 +169,38 @@ export interface MeetingSpeaker {
   evidenceArtifactId: string | null;
 }
 
+export interface TranscriptWord {
+  startMs: number;
+  endMs: number;
+  word: string;
+  confidence?: number;
+  speaker?: string;
+}
+
+export interface TranscriptSegment {
+  startMs: number;
+  endMs: number;
+  speaker: string;
+  text: string;
+  words?: TranscriptWord[];
+}
+
+export interface Transcript {
+  segments: TranscriptSegment[];
+  language?: string;
+  durationMs?: number;
+}
+
+export interface EnrolledSpeaker {
+  id: string;
+  name: string;
+  providerIds: Record<string, string[]>;
+}
+
+export interface TranscriptionProviderCaps {
+  diarization: boolean;
+  speakerId: boolean;
+  customVocab: boolean;
+}
+
 export type MeetingListItem = Meeting;

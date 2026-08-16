@@ -7,7 +7,9 @@
     "olive-server": "./src/index.ts"
   },
   "dependencies": {
+    "@mcowger/plaud-client": "^0.1.0",
     "@olive/shared": "workspace:*",
+    "@speechmatics/batch-client": "^5.4.2",
     "hono": "^4.13.1",
     "kysely": "^0.28.17",
     "kysely-bun-sqlite": "^0.4.0",

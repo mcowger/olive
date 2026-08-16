@@ -1,4 +1,4 @@
-# Applaud-NG — Milestones
+# Olive — Milestones
 
 Sequential breakdown of `HIGHLEVEL.md`'s Build order (§ "Build order (chosen)") into milestones
 with an explicit, testable exit gate at each boundary. Each milestone assumes all prior milestones
@@ -16,7 +16,6 @@ its own gate.
 | M2 | Speechmatics transcription + speaker ID | #3 | M |
 | M3 | Speaker registry UI + enrollment/backfill | #4 | S–M |
 | M4 | LLM summary/tag stage | #5 | S |
-| M5 | Obsidian destination (v2) | #6 | S |
 
 ---
 
@@ -153,28 +152,8 @@ primary transcript, provider-swappable via config.
 
 ---
 
-## M5 — Obsidian destination (v2)
-
-**Goal:** Export is a pure function of the Meeting aggregate; idempotent note upsert into a vault.
-
-**Depends on:** M2, M4 (needs primary transcript + summary to export); independent of M3.
-
-**Deliverables:**
-- Export function: Meeting + Artifacts + Speakers + Tags → Obsidian note (frontmatter with
-  `file_id` = meeting id, date/duration/source/speakers/tags) + audio link.
-- Idempotent upsert keyed on `file_id`; direct vault fs write path.
-
-**Exit gate (testable):**
-- Golden-fixture test: run export against a fixed Meeting aggregate, diff generated note text
-  against an expected fixture file.
-- Idempotency test: run export twice → second run updates the same file (matched by `file_id`
-  frontmatter) instead of creating a duplicate note.
-- Manual: point at a real Obsidian vault folder, confirm the note opens correctly and links resolve.
-
----
-
 ## Deferred / non-goals (unchanged from HIGHLEVEL.md)
 
-No milestone covers: Obsidian Local REST API alternate write-path, n8n-style workflow engine,
+No milestone covers: n8n-style workflow engine,
 reMarkable/Boox/Google Drive/Notion destinations, macOS Voice Memos filesystem watcher, local
 Whisper/pyannote pipeline. These remain out of scope per `HIGHLEVEL.md` § Non-goals.

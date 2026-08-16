@@ -1,6 +1,6 @@
-# Applaud-NG — High-Level Plan
+# Olive — High-Level Plan
 
-A self-hosted audio pipeline: recordings in → transcript + speaker ID + summary + tags → Obsidian notes out.
+A self-hosted audio pipeline: recordings in → transcript + speaker ID + summary + tags → reviewable archive.
 Built as a **new repo**, using `mcowger/applaud` as scaffold/reference (not developed in-place).
 
 Status: planning locked, nothing built yet.
@@ -14,14 +14,14 @@ Status: planning locked, nothing built yet.
 
 ## Locked decisions
 
-1. **No paid tier, no n8n.** Everything self-hosted; Obsidian is the primary destination (deferred to v2; MVP relies on local disk and webhooks).
+1. **No paid tier, no n8n.** Everything self-hosted; MVP relies on local disk and webhooks.
 2. **Plaud ingestion via the official documented API** (docs.plaud.ai), replacing the fork's cookie/session scraping.
 3. **Speechmatics** (batch) handles ALL raw-audio transcription: STT + within-file diarization + **cross-recording speaker identification** (voiceprint enrollment — confirmed supported in batch + realtime). ~$0.0067/min. Privacy is not a concern; delete audio from their 7-day retention after ingest as hygiene.
 4. **Summaries + auto-tagging via a pluggable LLM** (Anthropic/OpenAI/Ollama to start) — Speechmatics' own summaries not relied upon.
 5. **Apple Voice Memos constraint:** assume access is ONLY via iOS device/iCloud. Voice Memos lives in a private CloudKit container — no iCloud Drive path, no web UI, no macOS filesystem assumption. **iOS Share-Sheet Shortcut + upload endpoint is the sole ingress.** (macOS group-container watcher documented below as dormant option.)
 6. **Plaud official API verified usable by individuals** — proven by multiple working OSS implementations, including our own `@mcowger/plaud-client` (OAuth 2.0 + PKCE against `platform.plaud.ai/developer/api`). No feasibility spike required.
 7. **LLM, STT, and Diarization are capability interfaces, not vendors.** Speechmatics is the first STT/diarization implementation, not a coupling. Each stage talks to a defined interface; providers advertise capabilities and are swappable via config. Future candidates: ElevenLabs Scribe, Deepgram, AssemblyAI, local whisper.cpp/mlx-whisper (+pyannote if diarization needed locally), Groq; LLM candidates already include Anthropic/OpenAI/Ollama.
-8. **The aggregate root is a `Meeting`, not a recording.** A Meeting owns multiple typed **artifacts** — audio recording(s), transcript(s) (each tied to a recording), summaries — plus links to **known speakers** (name + provider voiceprint IDs/embedding vectors). Every artifact carries **provenance** (provider, format, timestamps), and all available artifacts are ingested and retained: Plaud's server-side transcript and summary are first-class artifacts alongside any we generate. Meeting-level exports (Obsidian, webhook, future notes tools) are pure functions of the Meeting aggregate.
+8. **The aggregate root is a `Meeting`, not a recording.** A Meeting owns multiple typed **artifacts** — audio recording(s), transcript(s) (each tied to a recording), summaries — plus links to **known speakers** (name + provider voiceprint IDs/embedding vectors). Every artifact carries **provenance** (provider, format, timestamps), and all available artifacts are ingested and retained: Plaud's server-side transcript and summary are first-class artifacts alongside any we generate. Meeting-level exports (webhook, future notes tools) are pure functions of the Meeting aggregate.
 
 ## Research findings (why these decisions)
 
@@ -78,11 +78,9 @@ web UI upload              ── audio artifact                             ─
       w/ enrolled names; needed when       from chosen primary    voiceprint enrollment)
       enrolled speakers exist /          transcript)
       configured / no Plaud transcript)
-                                   │
-                                   ▼
-                Obsidian note (file_id = meeting id; frontmatter: date,
-                 duration, source(s), speakers, tags; summary; transcript; audio link)
-                + webhook (existing, keep as bonus)
+                                    │
+                                    ▼
+                Webhook payload / Review UI viewer
 ```
 
 - **Uniform model:** one `sources → ingest → stages → destinations` pipeline; every meeting gets an on-disk folder (fork-derived layout, now per-meeting): `<meetings>/<YYYY-MM-DD_title__meetingId8>/` containing `audio/`, `transcripts/<provider>.{json,txt}`, `summaries/<provider>.md`. Blob bytes live on disk; metadata + relationships live in SQLite.
@@ -90,7 +88,6 @@ web UI upload              ── audio artifact                             ─
 - **Speaker registry:** SQLite table (name, provider voiceprint identifiers — e.g. Speechmatics `speaker_identifiers[]`, enrolled_at); attached to every Speechmatics job; backfill step renames speakers in past transcripts on enrollment.
 - **Artifact Immutability (MVP):** The UI is strictly read-only for MVP. There is no editing of transcripts or manual fixing of speakers, preserving artifact provenance.
 - **Data Durability:** Backups for the SQLite database are considered out of scope for MVP.
-- **Obsidian write-path (Deferred to v2):** default = direct vault file write (server needs fs visibility into the vault — same host or sync mount) with **stable `file_id` frontmatter → idempotent upserts** and folder split `Notes/` + `Audio/`, filename pattern `{date}-{title}` (conventions per ecosystem survey). Alternative = Obsidian Local REST API plugin when the server can't touch the vault filesystem; requires Obsidian running.
 
 ### Provider interfaces (Decision 7)
 
@@ -131,7 +128,7 @@ Artifact       { id, meetingId, recordingId?, kind: 'transcript'|'summary',
                  path, createdAt }                                          // provenance on every row
 Speaker        { id, name, providerIds: { speechmatics?: string[] }, enrolledAt, enrollmentClipPaths: string[] }   // voiceprint vectors/IDs, keep raw clips for provider migration
 MeetingSpeaker { meetingId, speakerId, evidenceArtifactId }               // who was in which meeting
-Export         = f(Meeting + Artifacts + Speakers + Tags)  → Obsidian note / webhook payload
+Export         = f(Meeting + Artifacts + Speakers + Tags)  → webhook payload / review UI
 ```
 
 - **Multiple recordings per meeting** is supported in the schema (multi-device capture, manual merge) but MVP creation is 1 recording → 1 meeting; merging is an explicit later op.
@@ -156,7 +153,6 @@ Export         = f(Meeting + Artifacts + Speakers + Tags)  → Obsidian note / w
 | 3 | **Speechmatics pipeline** | M | First `TranscriptionProvider` + `SpeakerIdentityProvider` implementations behind the Decision-7 interfaces. Batch jobs + Notifications webhook completion (not polling); speaker registry attached; 7-day-retention delete-after-ingest; transcription for all raw-audio sources. Long-audio: chunking or fetch-URL >1GB (open-plaud's chunk pattern). Stage flags decoupled per open-plaud (`state`-tracked, retryable per stage). |
 | 4 | **Speaker registry UI + enrollment/backfill** | S–M | Enroll from 5–30s clip; rename-in-history on enrollment; unknown-speaker surfacing in UI. |
 | 5 | **LLM summary/tag stage** | S | First `LLMProvider` implementations (one OpenAI-compatible adapter covers OpenRouter/Ollama/LM Studio; Anthropic separate). Provider/model/prompt in settings; runs on final canonical transcript; emits summary md + tags[]. |
-| 6 | **Obsidian destination (v2)** | S | Export = pure function of Meeting aggregate: one note per meeting, YAML frontmatter (date/duration/source/speakers/tags/**file_id = meeting id**) + primary summary + primary transcript + audio link; idempotent upsert keyed on `file_id`. Fork groundwork reusable: filename sanitizer already Obsidian-safe. |
 
 ## Non-goals
 

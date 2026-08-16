@@ -6,7 +6,12 @@ import { logger } from "./logger.ts";
 const runtimeConfig = loadRuntimeConfig();
 const appConfig = loadAppConfig(runtimeConfig.paths);
 const webRoot = process.env.OLIVE_WEB_ROOT || join(import.meta.dir, "../../web/dist");
-const app = createApp({ webRoot });
+const app = createApp({
+  webRoot,
+  meetingsDir: runtimeConfig.paths.meetingsDir,
+  pollIntervalMinutes: appConfig.pollIntervalMinutes,
+  startPlaudPoller: import.meta.main
+});
 
 if (import.meta.main) {
   const server = Bun.serve({

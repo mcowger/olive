@@ -11,10 +11,12 @@ import { PlaudAuthSessionStore } from "./plaud/auth.ts";
 import { PlaudPoller, type PlaudClientLike, type PlaudOAuthManager } from "./plaud/poller.ts";
 import { SpeechmaticsClient, type SpeechmaticsJsonV2 } from "./providers/speechmatics/index.ts";
 import { TranscriptionService } from "./transcription/service.ts";
+import { SpeakerService } from "./speakers/service.ts";
 
 export interface AppOptions {
   db?: Kysely<Database>;
   webRoot?: string;
+  configDir?: string;
   meetingsDir?: string;
   plaudClient?: PlaudClientLike;
   plaudPoller?: PlaudPoller;
@@ -24,6 +26,7 @@ export interface AppOptions {
   startPlaudPoller?: boolean;
   speechmaticsClient?: SpeechmaticsClient;
   transcriptionService?: TranscriptionService;
+  speakerService?: SpeakerService;
   speechmaticsWebhookSecret?: string;
 }
 
@@ -58,16 +61,29 @@ async function serveWebAsset(webRoot: string, requestPath: string): Promise<Resp
 export function createApp(options: AppOptions = {}): Hono {
   const app = new Hono();
   const db = options.db ?? getDb();
-  const meetingsDir = options.meetingsDir ?? resolvePaths().meetingsDir;
+  const paths = resolvePaths();
+  const configDir = options.configDir ?? paths.configDir;
+  const meetingsDir = options.meetingsDir ?? paths.meetingsDir;
   const speechmaticsWebhookSecret = options.speechmaticsWebhookSecret || process.env.SPEECHMATICS_WEBHOOK_SECRET;
+
+  const speechmaticsClient = options.speechmaticsClient ?? new SpeechmaticsClient();
 
   const transcriptionService =
     options.transcriptionService ??
     new TranscriptionService({
       db,
       meetingsDir,
-      speechmaticsClient: options.speechmaticsClient ?? new SpeechmaticsClient(),
+      speechmaticsClient,
       webhookSecret: speechmaticsWebhookSecret
+    });
+
+  const speakerService =
+    options.speakerService ??
+    new SpeakerService({
+      db,
+      configDir,
+      meetingsDir,
+      speechmaticsClient
     });
 
   const plaudPoller =
@@ -156,6 +172,157 @@ export function createApp(options: AppOptions = {}): Hono {
       return c.json(result);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  // Speakers API
+  app.get("/api/speakers", async (c) => {
+    const speakers = await speakerService.listSpeakers();
+    return c.json({ speakers });
+  });
+
+  app.get("/api/speakers/:id", async (c) => {
+    const id = c.req.param("id");
+    const result = await speakerService.getSpeaker(id);
+    if (!result) {
+      return c.json({ error: "Speaker not found" }, 404);
+    }
+    return c.json(result);
+  });
+
+  app.post("/api/speakers/enroll", async (c) => {
+    let formData: FormData;
+    try {
+      formData = await c.req.formData();
+    } catch (err) {
+      return c.json({ error: "Multipart form data required" }, 400);
+    }
+
+    const name = formData.get("name");
+    const file = formData.get("file");
+    const speakerId = formData.get("speakerId");
+    const language = formData.get("language");
+
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return c.json({ error: "name field is required" }, 400);
+    }
+
+    if (!file || !(file instanceof Blob)) {
+      return c.json({ error: "file field (audio blob) is required" }, 400);
+    }
+
+    try {
+      const audioBytes = new Uint8Array(await file.arrayBuffer());
+      const filename = file instanceof File ? file.name : "audio.wav";
+      const mime = file.type || "audio/wav";
+
+      const speaker = await speakerService.enrollSpeaker({
+        name: name.trim(),
+        audioBytes,
+        mime,
+        filename,
+        speakerId: typeof speakerId === "string" ? speakerId : undefined,
+        language: typeof language === "string" ? language : undefined
+      });
+
+      return c.json({ status: "enrolled", speaker });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/speakers/merge", async (c) => {
+    let body: { sourceSpeakerId?: string; targetSpeakerId?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    if (!body.sourceSpeakerId || !body.targetSpeakerId) {
+      return c.json({ error: "sourceSpeakerId and targetSpeakerId are required" }, 400);
+    }
+
+    try {
+      const merged = await speakerService.mergeSpeakers(body.sourceSpeakerId, body.targetSpeakerId);
+      return c.json({ speaker: merged });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/speakers/reassign", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: { fromLabel?: string; toSpeakerName?: string; toSpeakerId?: string; adoptVoiceprint?: boolean };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    if (!body.fromLabel || (!body.toSpeakerName && !body.toSpeakerId)) {
+      return c.json({ error: "fromLabel and either toSpeakerName or toSpeakerId are required" }, 400);
+    }
+
+    try {
+      const result = await speakerService.reassignMeetingSpeaker({
+        meetingId,
+        fromLabel: body.fromLabel,
+        toSpeakerName: body.toSpeakerName,
+        toSpeakerId: body.toSpeakerId,
+        adoptVoiceprint: body.adoptVoiceprint
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.patch("/api/speakers/:id", async (c) => {
+    const id = c.req.param("id");
+    let body: { name?: string; providerIds?: Record<string, string[]> };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    try {
+      const updated = await speakerService.updateSpeaker(id, body);
+      return c.json({ speaker: updated });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/speakers/:id", async (c) => {
+    const id = c.req.param("id");
+    await speakerService.deleteSpeaker(id);
+    return c.json({ status: "deleted" });
+  });
+
+  app.post("/api/meetings/:id/speakers/link", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: { speakerId?: string; speechmaticsLabel?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    if (!body.speakerId) {
+      return c.json({ error: "speakerId is required" }, 400);
+    }
+
+    try {
+      const result = await speakerService.linkMeetingSpeaker({
+        meetingId,
+        speakerId: body.speakerId,
+        speechmaticsLabel: body.speechmaticsLabel
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   });
 

@@ -6,6 +6,7 @@ import { createDb } from "../src/db.ts";
 import { meetingPaths } from "../src/layout.ts";
 import { SpeechmaticsClient } from "../src/providers/speechmatics/client.ts";
 import { STAGE_SPEECHMATICS_TRANSCRIBE, TranscriptionService } from "../src/transcription/service.ts";
+import { SpeakerService } from "../src/speakers/service.ts";
 
 const FIXTURES_DIR = join(import.meta.dir, "fixtures/audio");
 const SAMPLE_SPEECHMATICS_WAV = join(FIXTURES_DIR, "speechmatics-sample.wav");
@@ -203,5 +204,106 @@ describe("Live Speechmatics integration tests (opt-in)", () => {
       await rm(meetingsDir, { recursive: true, force: true });
     },
     180_000
+  );
+
+  test.skipIf(!shouldRunLive)(
+    "enrolls a speaker voiceprint and recognizes the speaker by name across recordings",
+    async () => {
+      const handle = createDb(":memory:");
+      const configDir = await mkdtemp(join(import.meta.dir, "sm-live-enroll-config-"));
+      const meetingsDir = await mkdtemp(join(import.meta.dir, "sm-live-enroll-meetings-"));
+      const now = Date.now();
+
+      const client = new SpeechmaticsClient();
+      const speakerService = new SpeakerService({
+        db: handle.db,
+        configDir,
+        meetingsDir,
+        speechmaticsClient: client
+      });
+      const transcriptionService = new TranscriptionService({
+        db: handle.db,
+        meetingsDir,
+        speechmaticsClient: client
+      });
+
+      // 1. Enroll voice clip as "Alice"
+      const clipBytes = await readFile(SAMPLE_SPEECHMATICS_WAV);
+      const enrolled = await speakerService.enrollSpeaker({
+        name: "Alice",
+        audioBytes: new Uint8Array(clipBytes),
+        mime: "audio/wav",
+        filename: "speechmatics-sample.wav"
+      });
+
+      console.log(`Enrolled speaker: name=${enrolled.name}, speechmaticsIds=${JSON.stringify(enrolled.providerIds.speechmatics)}`);
+      expect(enrolled.name).toBe("Alice");
+      expect(enrolled.providerIds.speechmatics).toBeArray();
+      expect(enrolled.providerIds.speechmatics.length).toBeGreaterThan(0);
+
+      // 2. Create a meeting with the same voice audio
+      const meetingId = "live-id-meeting-3";
+      const paths = meetingPaths(meetingsDir, now, "Recognition Verification", meetingId);
+      await mkdir(paths.audioDir, { recursive: true });
+      const targetAudioPath = join(paths.folder, "audio/test.wav");
+      await copyFile(SAMPLE_SPEECHMATICS_WAV, targetAudioPath);
+      const audioStats = await stat(targetAudioPath);
+
+      await handle.db
+        .insertInto("meetings")
+        .values({
+          id: meetingId,
+          title: "Recognition Verification",
+          start_time: now,
+          end_time: now + 30_000,
+          source: "upload",
+          status: "ready",
+          tags: "[]",
+          primary_transcript_artifact_id: null,
+          primary_summary_artifact_id: null,
+          last_error: null,
+          created_at: now,
+          updated_at: now
+        })
+        .execute();
+
+      await handle.db
+        .insertInto("recordings")
+        .values({
+          id: "live-rec-verif",
+          meeting_id: meetingId,
+          path: "audio/test.wav",
+          mime: "audio/wav",
+          duration_ms: 30_000,
+          size_bytes: audioStats.size,
+          sha256: "live-sha256-verif-wav",
+          provider: "upload",
+          provider_recording_id: null,
+          created_at: now
+        })
+        .execute();
+
+      // 3. Transcribe meeting — TranscriptionService passes Alice's enrolled voiceprint identifiers
+      const result = await transcriptionService.transcribeMeeting(meetingId, {
+        poll: true,
+        pollIntervalMs: 2500,
+        maxPollWaitMs: 180_000
+      });
+
+      expect(result.status).toBe("done");
+
+      const txtArtifactPath = join(paths.folder, "transcripts/speechmatics.txt");
+      const txtContent = await readFile(txtArtifactPath, "utf8");
+      console.log("Speaker Identification output:\n", txtContent.slice(0, 300));
+
+      // Assert Speechmatics tagged the segment with the enrolled label "Alice"
+      expect(txtContent).toContain("Alice:");
+
+      await handle.db.destroy();
+      handle.sqlite.close();
+      await rm(configDir, { recursive: true, force: true });
+      await rm(meetingsDir, { recursive: true, force: true });
+    },
+    240_000
   );
 });

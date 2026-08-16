@@ -78,9 +78,12 @@ export class SpeechmaticsClient {
     if (options.speakers && options.speakers.length > 0) {
       speakerDiarizationConfig.speakers = options.speakers.slice(0, 50).map((s) => ({
         label: s.label,
-        speaker_identifiers: new Set(s.speaker_identifiers)
-      }));
-    } else if (options.getSpeakers) {
+        speaker_identifiers: Array.isArray(s.speaker_identifiers)
+          ? s.speaker_identifiers
+          : Array.from(s.speaker_identifiers)
+      })) as any;
+    }
+    if (options.getSpeakers) {
       speakerDiarizationConfig.get_speakers = true;
     }
 

@@ -156,6 +156,7 @@ export class TranscriptionService {
         mime: recording.mime,
         language: options.language || "en",
         speakers: speakerConfigs.length > 0 ? speakerConfigs : undefined,
+        getSpeakers: true,
         webhookUrl,
         webhookSecret: this.webhookSecret
       });

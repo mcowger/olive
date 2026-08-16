@@ -35,7 +35,7 @@ describe("Speechmatics client", () => {
     expect(capturedConfig.transcription_config.language).toBe("en");
     expect(capturedConfig.transcription_config.diarization).toBe("speaker");
     expect(capturedConfig.transcription_config.speaker_diarization_config.speakers).toEqual([
-      { label: "Alice", speaker_identifiers: new Set(["id-1", "id-2"]) }
+      { label: "Alice", speaker_identifiers: ["id-1", "id-2"] }
     ]);
     expect(capturedConfig.notification_config).toEqual([
       {

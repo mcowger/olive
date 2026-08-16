@@ -57,8 +57,9 @@ export interface SpeechmaticsResultItem {
 }
 
 export interface SpeechmaticsSpeakerSummary {
-  speaker: string;
-  speaker_identifiers?: string[];
+  speaker?: string;
+  label?: string;
+  speaker_identifiers?: string[] | Set<string>;
 }
 
 export interface SpeechmaticsJsonV2 {

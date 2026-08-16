@@ -7,3 +7,5 @@ packages/web/src/styles.generated.css
 *.sqlite-shm
 *.sqlite-wal
 settings.json
+transcribe-api-test-*
+packages/server/test/transcribe-api-test-*

@@ -204,18 +204,28 @@ export class SpeakerService {
       throw new Error("Either toSpeakerId or toSpeakerName must be provided");
     }
 
-    // 2. Read meeting transcript artifact
-    const transcriptArtifact = await this.db
-      .selectFrom("artifacts")
-      .selectAll()
-      .where("meeting_id", "=", meetingId)
-      .where("provider", "=", "speechmatics")
-      .where("kind", "=", "transcript")
-      .where("format", "=", "json")
-      .executeTakeFirst();
+    // 2. Read meeting transcript artifact (primary or any json transcript)
+    let transcriptArtifact = meeting.primary_transcript_artifact_id
+      ? await this.db
+          .selectFrom("artifacts")
+          .selectAll()
+          .where("id", "=", meeting.primary_transcript_artifact_id)
+          .executeTakeFirst()
+      : undefined;
+
+    if (!transcriptArtifact || transcriptArtifact.kind !== "transcript" || transcriptArtifact.format !== "json") {
+      transcriptArtifact = await this.db
+        .selectFrom("artifacts")
+        .selectAll()
+        .where("meeting_id", "=", meetingId)
+        .where("kind", "=", "transcript")
+        .where("format", "=", "json")
+        .orderBy("created_at", "desc")
+        .executeTakeFirst();
+    }
 
     if (!transcriptArtifact) {
-      throw new Error(`No Speechmatics transcript artifact found for meeting ${meetingId}`);
+      throw new Error(`No JSON transcript artifact found for meeting ${meetingId}`);
     }
 
     const folder = meetingPaths(this.meetingsDir, meeting.start_time, meeting.title, meeting.id).folder;
@@ -223,80 +233,111 @@ export class SpeakerService {
     const rawContent = await readFile(jsonPath, "utf8");
     const parsedData = JSON.parse(rawContent);
 
-    const segments: any[] = parsedData.segments ?? [];
     let updatedSegmentsCount = 0;
     let extractedVoiceprintsCount = 0;
+    const normalizedFrom = fromLabel.trim().toLowerCase();
 
-    // 3. Adopt voiceprint from the meeting transcript metadata if requested
-    if (adoptVoiceprint) {
-      const extractedIds: string[] = [];
-      const speakerList = (parsedData.speakers ?? []) as any[];
+    let updatedTranscript: Transcript;
 
-      for (const s of speakerList) {
-        const label = (s.label || s.speaker || "").trim().toLowerCase();
-        if (label === fromLabel.trim().toLowerCase() && s.speaker_identifiers) {
-          const ids = Array.isArray(s.speaker_identifiers)
-            ? s.speaker_identifiers
-            : Array.from(s.speaker_identifiers);
-          for (const id of ids as string[]) {
-            if (id && !extractedIds.includes(id)) {
-              extractedIds.push(id);
+    if (Array.isArray(parsedData)) {
+      // Plaud or legacy array format
+      for (const item of parsedData) {
+        if (item.speaker && item.speaker.trim().toLowerCase() === normalizedFrom) {
+          item.speaker = targetSpeakerRow.name;
+          updatedSegmentsCount++;
+        }
+      }
+      await writeFile(jsonPath, `${JSON.stringify(parsedData, null, 2)}\n`, "utf8");
+
+      const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
+      const textLines = parsedData
+        .filter((item: any) => item.content && item.content.trim())
+        .map((item: any) => `${item.speaker || "Speaker"}: ${item.content}`);
+      await writeFile(txtPath, `${textLines.join("\n\n")}\n`, "utf8");
+
+      updatedTranscript = {
+        segments: parsedData
+          .filter((item: any) => item.content && item.content.trim())
+          .map((item: any) => ({
+            speaker: item.speaker || "Speaker",
+            text: item.content,
+            startMs: item.start_time ?? 0,
+            endMs: item.end_time ?? 0
+          }))
+      };
+    } else {
+      // Canonical Transcript format
+      const segments: any[] = parsedData.segments ?? [];
+
+      // 3. Adopt voiceprint from the meeting transcript metadata if requested
+      if (adoptVoiceprint) {
+        const extractedIds: string[] = [];
+        const speakerList = (parsedData.speakers ?? []) as any[];
+
+        for (const s of speakerList) {
+          const label = (s.label || s.speaker || "").trim().toLowerCase();
+          if (label === normalizedFrom && s.speaker_identifiers) {
+            const ids = Array.isArray(s.speaker_identifiers)
+              ? s.speaker_identifiers
+              : Array.from(s.speaker_identifiers);
+            for (const id of ids as string[]) {
+              if (id && !extractedIds.includes(id)) {
+                extractedIds.push(id);
+              }
+            }
+          }
+        }
+
+        if (extractedIds.length > 0) {
+          extractedVoiceprintsCount = extractedIds.length;
+          const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
+          const currentSmIds = new Set(providerIds.speechmatics ?? []);
+          for (const id of extractedIds) {
+            currentSmIds.add(id);
+          }
+          providerIds.speechmatics = Array.from(currentSmIds);
+
+          await this.db
+            .updateTable("speakers")
+            .set({
+              provider_ids: JSON.stringify(providerIds),
+              enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
+            })
+            .where("id", "=", targetSpeakerRow.id)
+            .execute();
+
+          targetSpeakerRow = await this.db
+            .selectFrom("speakers")
+            .selectAll()
+            .where("id", "=", targetSpeakerRow.id)
+            .executeTakeFirstOrThrow();
+        }
+      }
+
+      // 4. Update speaker labels in segments
+      for (const segment of segments) {
+        if (segment.speaker && segment.speaker.trim().toLowerCase() === normalizedFrom) {
+          segment.speaker = targetSpeakerRow.name;
+          updatedSegmentsCount++;
+          if (segment.words && Array.isArray(segment.words)) {
+            for (const word of segment.words) {
+              word.speaker = targetSpeakerRow.name;
             }
           }
         }
       }
 
-      if (extractedIds.length > 0) {
-        extractedVoiceprintsCount = extractedIds.length;
-        const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
-        const currentSmIds = new Set(providerIds.speechmatics ?? []);
-        for (const id of extractedIds) {
-          currentSmIds.add(id);
-        }
-        providerIds.speechmatics = Array.from(currentSmIds);
+      updatedTranscript = {
+        segments,
+        language: parsedData.language,
+        durationMs: parsedData.durationMs
+      };
 
-        await this.db
-          .updateTable("speakers")
-          .set({
-            provider_ids: JSON.stringify(providerIds),
-            enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
-          })
-          .where("id", "=", targetSpeakerRow.id)
-          .execute();
+      await writeFile(jsonPath, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
 
-        targetSpeakerRow = await this.db
-          .selectFrom("speakers")
-          .selectAll()
-          .where("id", "=", targetSpeakerRow.id)
-          .executeTakeFirstOrThrow();
-      }
+      const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
+      await writeFile(txtPath, `${transcriptToText(updatedTranscript)}\n`, "utf8");
     }
-
-    // 4. Update speaker labels in segments
-    const normalizedFrom = fromLabel.trim().toLowerCase();
-    for (const segment of segments) {
-      if (segment.speaker && segment.speaker.trim().toLowerCase() === normalizedFrom) {
-        segment.speaker = targetSpeakerRow.name;
-        updatedSegmentsCount++;
-        if (segment.words && Array.isArray(segment.words)) {
-          for (const word of segment.words) {
-            word.speaker = targetSpeakerRow.name;
-          }
-        }
-      }
-    }
-
-    // 5. Write updated json and txt back to disk
-    const updatedTranscript: Transcript = {
-      segments,
-      language: parsedData.language,
-      durationMs: parsedData.durationMs
-    };
-
-    await writeFile(jsonPath, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
-
-    const txtPath = join(folder, "transcripts/speechmatics.txt");
-    await writeFile(txtPath, `${transcriptToText(updatedTranscript)}\n`, "utf8");
 
     // 6. Link target speaker in meeting_speakers
     await this.db

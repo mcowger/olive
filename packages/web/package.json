@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "dev": "bun run dev.ts"
+  },
   "dependencies": {
     "@olive/shared": "workspace:*",
     "react": "^19.2.8",

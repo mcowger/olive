@@ -40,7 +40,8 @@ const tailwindWatch = Bun.spawn([
   stderr: "inherit"
 });
 
-const apiOrigin = process.env.OLIVE_API_ORIGIN || "http://127.0.0.1:4471";
+const serverPort = process.env.OLIVE_BIND_PORT || process.env.PORT || process.env.PASEO_PORT || "4471";
+const apiOrigin = process.env.OLIVE_API_ORIGIN || `http://127.0.0.1:${serverPort}`;
 
 Bun.serve({
   development: {

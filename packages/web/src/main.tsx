@@ -26,6 +26,12 @@ interface SpeakerWithStats extends Speaker {
   meetingCount: number;
 }
 
+interface PlaudStatus {
+  connected: boolean;
+  lastPollAt: number | null;
+  pcsPending: number;
+}
+
 function formatDate(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
@@ -58,6 +64,10 @@ export function App(): ReactElement {
   // Global speakers cache
   const [knownSpeakers, setKnownSpeakers] = useState<SpeakerWithStats[]>([]);
 
+  // Plaud status
+  const [plaudStatus, setPlaudStatus] = useState<PlaudStatus | null>(null);
+  const [showPlaudModal, setShowPlaudModal] = useState(false);
+
   const refreshSpeakers = async () => {
     try {
       const res = await fetch("/api/speakers");
@@ -70,8 +80,21 @@ export function App(): ReactElement {
     }
   };
 
+  const refreshPlaudStatus = async () => {
+    try {
+      const res = await fetch("/api/plaud/status");
+      if (res.ok) {
+        const data = (await res.json()) as PlaudStatus;
+        setPlaudStatus(data);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     void refreshSpeakers();
+    void refreshPlaudStatus();
   }, []);
 
   return (
@@ -113,9 +136,23 @@ export function App(): ReactElement {
               </button>
             </div>
           </div>
-          <span className="rounded-full border border-stone-700 bg-stone-900 px-3 py-1 text-xs text-stone-400">
-            Pipeline Active
-          </span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPlaudModal(true);
+                void refreshPlaudStatus();
+              }}
+              className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition ${
+                plaudStatus?.connected
+                  ? "border-lime-400/30 bg-lime-400/10 text-lime-300 hover:bg-lime-400/20"
+                  : "border-amber-400/30 bg-amber-400/10 text-amber-300 hover:bg-amber-400/20"
+              }`}
+            >
+              <span className={`h-2 w-2 rounded-full ${plaudStatus?.connected ? "bg-lime-400" : "bg-amber-400"}`} />
+              {plaudStatus?.connected ? "Plaud Connected" : "Connect Plaud"}
+            </button>
+          </div>
         </div>
       </nav>
 
@@ -140,6 +177,269 @@ export function App(): ReactElement {
           />
         )}
       </main>
+
+      {/* Plaud Auth & Sync Modal */}
+      {showPlaudModal && (
+        <PlaudModal
+          status={plaudStatus}
+          onClose={() => setShowPlaudModal(false)}
+          onRefreshStatus={() => void refreshPlaudStatus()}
+        />
+      )}
+    </div>
+  );
+}
+
+function PlaudModal({
+  status,
+  onClose,
+  onRefreshStatus
+}: {
+  status: PlaudStatus | null;
+  onClose: () => void;
+  onRefreshStatus: () => void;
+}): ReactElement {
+  const [authStep, setAuthStep] = useState<"idle" | "authorizing" | "success" | "error">("idle");
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [callbackInput, setCallbackInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+
+  const handleStartAuth = async () => {
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch("/api/plaud/auth/start", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { authUrl: string; sessionId: string };
+      setAuthUrl(data.authUrl);
+      setSessionId(data.sessionId);
+      setAuthStep("authorizing");
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCompleteAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sessionId || !callbackInput.trim()) {
+      alert("Please paste the callback URL or code from your browser");
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch("/api/plaud/auth/complete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          pastedUrlOrCode: callbackInput.trim()
+        })
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+
+      setAuthStep("success");
+      onRefreshStatus();
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTriggerSync = async () => {
+    setSyncing(true);
+    setSyncMessage(null);
+    try {
+      const res = await fetch("/api/plaud/sync/trigger", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setSyncMessage(`Sync completed: ${data.discovered} discovered, ${data.resolved} resolved.`);
+      onRefreshStatus();
+    } catch (err) {
+      setSyncMessage(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/80 backdrop-blur-sm p-4">
+      <div className="w-full max-w-lg rounded-2xl border border-stone-800 bg-stone-900 p-6 shadow-2xl space-y-6">
+        <div className="flex items-center justify-between border-b border-stone-800 pb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-lg font-bold">Plaud Integration</span>
+            <span
+              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                status?.connected ? "bg-lime-400/10 text-lime-300" : "bg-amber-400/10 text-amber-300"
+              }`}
+            >
+              {status?.connected ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+          <button type="button" onClick={onClose} className="text-stone-400 hover:text-stone-200 text-lg">
+            ✕
+          </button>
+        </div>
+
+        {errorMessage && (
+          <div className="rounded-xl border border-red-900 bg-red-950/40 p-4 text-xs text-red-200">
+            {errorMessage}
+          </div>
+        )}
+
+        {syncMessage && (
+          <div className="rounded-xl border border-lime-900 bg-lime-950/40 p-4 text-xs text-lime-200">
+            {syncMessage}
+          </div>
+        )}
+
+        {status?.connected && authStep === "idle" ? (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-stone-800 bg-stone-950/60 p-4 space-y-2 text-xs text-stone-300">
+              <div className="flex justify-between">
+                <span className="text-stone-400">Connection Status:</span>
+                <span className="font-semibold text-lime-300">Active (OAuth tokens valid)</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-400">Last Synced:</span>
+                <span>{status.lastPollAt ? formatDate(status.lastPollAt) : "Never"}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-400">Pending PCS Items:</span>
+                <span>{status.pcsPending}</span>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={syncing}
+                onClick={() => void handleTriggerSync()}
+                className="flex-1 rounded-lg bg-lime-400 py-2 text-sm font-semibold text-stone-950 hover:bg-lime-300 disabled:opacity-50 transition"
+              >
+                {syncing ? "Syncing with Plaud…" : "Sync Now"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleStartAuth()}
+                className="rounded-lg border border-stone-700 bg-stone-800 px-4 py-2 text-sm font-medium text-stone-300 hover:bg-stone-700 transition"
+              >
+                Re-authenticate
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {authStep === "idle" && (
+              <div className="space-y-4 text-sm text-stone-300">
+                <p>
+                  Connect your Plaud account using OAuth 2.0 PKCE to automatically ingest recordings, transcripts, and summaries into Olive.
+                </p>
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => void handleStartAuth()}
+                  className="w-full rounded-lg bg-lime-400 py-2.5 text-sm font-semibold text-stone-950 hover:bg-lime-300 disabled:opacity-50 transition"
+                >
+                  {loading ? "Generating login link…" : "Start Plaud OAuth Login"}
+                </button>
+              </div>
+            )}
+
+            {authStep === "authorizing" && authUrl && (
+              <form onSubmit={handleCompleteAuth} className="space-y-4 text-sm">
+                <div className="rounded-xl border border-stone-800 bg-stone-950/80 p-4 space-y-3">
+                  <p className="font-semibold text-stone-200">Step 1: Authorize with Plaud</p>
+                  <p className="text-xs text-stone-400 leading-relaxed">
+                    Click the button below to open the official Plaud login in a new tab. Log in and grant permission.
+                  </p>
+                  <a
+                    href={authUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-xs font-bold text-stone-950 hover:bg-lime-300 transition"
+                  >
+                    Open Plaud Login Page ↗
+                  </a>
+                </div>
+
+                <div className="rounded-xl border border-stone-800 bg-stone-950/80 p-4 space-y-3">
+                  <p className="font-semibold text-stone-200">Step 2: Paste the Callback URL</p>
+                  <p className="text-xs text-stone-400 leading-relaxed">
+                    After authorizing, Plaud will redirect your browser to a callback address starting with{" "}
+                    <code className="rounded bg-stone-900 px-1 py-0.5 text-lime-400">http://localhost:8199/auth/callback?code=...</code>{" "}
+                    (your browser might show "Site can't be reached"—this is normal). Copy the <strong>entire URL</strong> from your address bar and paste it below:
+                  </p>
+                  <input
+                    type="text"
+                    required
+                    placeholder="http://localhost:8199/auth/callback?code=...&state=..."
+                    value={callbackInput}
+                    onChange={(e) => setCallbackInput(e.target.value)}
+                    className="w-full rounded-lg border border-stone-700 bg-stone-900 px-3 py-2 text-xs text-stone-100 placeholder-stone-500 focus:border-lime-400 focus:outline-none"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setAuthStep("idle")}
+                    className="rounded-lg px-4 py-2 text-sm text-stone-400 hover:text-stone-200"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading || !callbackInput.trim()}
+                    className="rounded-lg bg-lime-400 px-5 py-2 text-sm font-semibold text-stone-950 hover:bg-lime-300 disabled:opacity-50 transition"
+                  >
+                    {loading ? "Verifying…" : "Complete Connection"}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {authStep === "success" && (
+              <div className="space-y-4 py-4 text-center">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-lime-400/20 text-2xl text-lime-300">
+                  ✓
+                </div>
+                <h4 className="text-lg font-bold text-stone-100">Plaud Connected Successfully!</h4>
+                <p className="text-xs text-stone-400">
+                  Olive is now authenticated with your Plaud account. Tokens will refresh automatically.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthStep("idle");
+                    onClose();
+                  }}
+                  className="rounded-lg bg-lime-400 px-6 py-2 text-sm font-semibold text-stone-950 hover:bg-lime-300 transition"
+                >
+                  Done
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -305,7 +605,21 @@ function MeetingDetailView({
     try {
       const parsed = JSON.parse(detail.transcriptContent);
       if (Array.isArray(parsed.segments)) {
-        parsedTranscriptSegments = parsed.segments;
+        parsedTranscriptSegments = parsed.segments.map((s: any) => ({
+          speaker: s.speaker || "Speaker",
+          text: s.text || s.content || "",
+          startMs: s.startMs ?? s.start_time ?? 0,
+          endMs: s.endMs ?? s.end_time ?? 0
+        }));
+      } else if (Array.isArray(parsed)) {
+        parsedTranscriptSegments = parsed
+          .filter((item: any) => item.content && item.content.trim())
+          .map((item: any) => ({
+            speaker: item.speaker || "Speaker",
+            text: item.content,
+            startMs: item.start_time ?? 0,
+            endMs: item.end_time ?? 0
+          }));
       }
     } catch {
       // plain text fallback

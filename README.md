@@ -11,8 +11,11 @@ bun run build
 bun run start
 ```
 
-The server listens on `127.0.0.1:4471` by default. `bun run dev:web` starts Bun's native HTML-import
-development server with HMR on port `3000` and proxies `/api/*` to the server.
+For live development with hot reload and file watching:
+
+* `bun run dev`: Starts both the backend API server (with `--watch`) and the web client (with HMR & Tailwind watcher) concurrently.
+* `bun run dev:server`: Starts only the backend API server on `127.0.0.1:4471` with `--watch`.
+* `bun run dev:web`: Starts only the web development server on port `3000` with Bun's native HTML-import HMR, proxying `/api/*` to the backend.
 
 Run checks with:
 

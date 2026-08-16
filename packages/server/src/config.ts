@@ -24,10 +24,11 @@ function parsePort(value: string | undefined): number {
 }
 
 export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
+  const portValue = env.OLIVE_BIND_PORT || env.PORT || env.PASEO_PORT;
   return {
     paths: resolvePaths(env),
     bindHost: env.OLIVE_BIND_HOST || "127.0.0.1",
-    bindPort: parsePort(env.OLIVE_BIND_PORT)
+    bindPort: parsePort(portValue)
   };
 }
 

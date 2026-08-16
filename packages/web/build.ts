@@ -41,6 +41,7 @@ try {
     }
     process.exitCode = 1;
   }
-} finally {
-  rmSync(generatedCss, { force: true });
+} catch (err) {
+  console.error(err);
+  process.exitCode = 1;
 }

@@ -12,14 +12,24 @@ import {
   type SpeechmaticsSpeakerConfig
 } from "../providers/speechmatics/index.ts";
 import { parseSpeechmaticsJsonV2, transcriptToText } from "../providers/speechmatics/normalize.ts";
+import {
+  LocalTranscriptionPipeline,
+  type DiscoveredSpeakerVoiceprint
+} from "../providers/local/index.ts";
 
 export const STAGE_SPEECHMATICS_TRANSCRIBE = "speechmatics_transcribe";
+export const STAGE_LOCAL_TRANSCRIBE = "local_transcribe";
 export const PROVIDER_SPEECHMATICS = "speechmatics";
+export const PROVIDER_LOCAL = "local";
+
+export type TranscriptionProviderName = "speechmatics" | "local";
 
 export interface TranscriptionServiceOptions {
   db: Kysely<Database>;
   meetingsDir: string;
   speechmaticsClient?: SpeechmaticsClient;
+  localPipeline?: LocalTranscriptionPipeline;
+  defaultProvider?: TranscriptionProviderName;
   logger?: Logger;
   webhookUrl?: string;
   webhookSecret?: string;
@@ -27,11 +37,13 @@ export interface TranscriptionServiceOptions {
 }
 
 export interface TranscribeMeetingOptions {
+  provider?: TranscriptionProviderName;
   language?: string;
   poll?: boolean;
   pollIntervalMs?: number;
   maxPollWaitMs?: number;
   force?: boolean;
+  similarityThreshold?: number;
 }
 
 export interface TranscribeMeetingResult {
@@ -56,6 +68,8 @@ export class TranscriptionService {
   private readonly db: Kysely<Database>;
   private readonly meetingsDir: string;
   private readonly client: SpeechmaticsClient;
+  private readonly localPipeline: LocalTranscriptionPipeline;
+  private readonly defaultProvider: TranscriptionProviderName;
   private readonly logger: Logger;
   private readonly webhookUrl?: string;
   private readonly webhookSecret?: string;
@@ -65,6 +79,8 @@ export class TranscriptionService {
     this.db = options.db;
     this.meetingsDir = options.meetingsDir;
     this.client = options.speechmaticsClient ?? new SpeechmaticsClient();
+    this.localPipeline = options.localPipeline ?? new LocalTranscriptionPipeline();
+    this.defaultProvider = options.defaultProvider ?? (process.env.SPEECHMATICS_API_KEY ? "speechmatics" : "local");
     this.logger = options.logger ?? defaultLogger;
     this.webhookUrl = options.webhookUrl;
     this.webhookSecret = options.webhookSecret;
@@ -75,7 +91,233 @@ export class TranscriptionService {
     return this.client;
   }
 
+  get local(): LocalTranscriptionPipeline {
+    return this.localPipeline;
+  }
+
   async transcribeMeeting(
+    meetingId: string,
+    options: TranscribeMeetingOptions = {}
+  ): Promise<TranscribeMeetingResult> {
+    const provider = options.provider ?? this.defaultProvider;
+
+    if (provider === "local") {
+      return this.transcribeMeetingLocal(meetingId, options);
+    }
+
+    return this.transcribeMeetingSpeechmatics(meetingId, options);
+  }
+
+  /**
+   * Transcribes a meeting using the Local SOTA ASR (Cohere Transcribe / ONNX)
+   * + Pyannote/Acoustic Diarization & Cross-recording Voiceprints.
+   */
+  async transcribeMeetingLocal(
+    meetingId: string,
+    options: TranscribeMeetingOptions = {}
+  ): Promise<TranscribeMeetingResult> {
+    const meeting = await this.db
+      .selectFrom("meetings")
+      .selectAll()
+      .where("id", "=", meetingId)
+      .executeTakeFirst();
+
+    if (!meeting) {
+      throw new Error(`Meeting not found: ${meetingId}`);
+    }
+
+    const recording = await this.db
+      .selectFrom("recordings")
+      .selectAll()
+      .where("meeting_id", "=", meetingId)
+      .orderBy("created_at", "asc")
+      .executeTakeFirst();
+
+    if (!recording) {
+      throw new Error(`No recording found for meeting ${meetingId}`);
+    }
+
+    const folder = meetingPaths(this.meetingsDir, meeting.start_time, meeting.title, meeting.id).folder;
+    const audioFullPath = join(folder, recording.path);
+
+    if (!existsSync(audioFullPath)) {
+      throw new Error(`Audio file not found on disk at ${audioFullPath}`);
+    }
+
+    let stageRun = await this.db
+      .selectFrom("stage_runs")
+      .selectAll()
+      .where("meeting_id", "=", meetingId)
+      .where("stage", "=", STAGE_LOCAL_TRANSCRIBE)
+      .executeTakeFirst();
+
+    if (stageRun?.status === "done" && !options.force) {
+      const existingArtifact = await this.db
+        .selectFrom("artifacts")
+        .select("id")
+        .where("meeting_id", "=", meetingId)
+        .where("provider", "=", PROVIDER_LOCAL)
+        .where("kind", "=", "transcript")
+        .where("format", "=", "json")
+        .executeTakeFirst();
+
+      return {
+        stageRunId: stageRun.id,
+        jobId: stageRun.provider_job_id ?? "",
+        status: "done",
+        transcriptArtifactId: existingArtifact?.id
+      };
+    }
+
+    const stageRunId = stageRun?.id ?? randomUUID();
+    const currentTime = this.now();
+
+    // Mark stage run as running
+    if (stageRun) {
+      await this.db
+        .updateTable("stage_runs")
+        .set({
+          status: "running",
+          attempts: stageRun.attempts + 1,
+          last_error: null,
+          started_at: currentTime,
+          updated_at: currentTime
+        })
+        .where("id", "=", stageRun.id)
+        .execute();
+    } else {
+      await this.db
+        .insertInto("stage_runs")
+        .values({
+          id: stageRunId,
+          meeting_id: meetingId,
+          stage: STAGE_LOCAL_TRANSCRIBE,
+          status: "running",
+          provider_job_id: `local-${stageRunId.slice(0, 8)}`,
+          attempts: 1,
+          last_error: null,
+          started_at: currentTime,
+          finished_at: null,
+          created_at: currentTime,
+          updated_at: currentTime
+        })
+        .execute();
+    }
+
+    try {
+      // 1. Fetch enrolled speakers for cross-recording identification
+      const enrolledSpeakers = await this.getEnrolledSpeakers();
+
+      // 2. Execute local transcription pipeline
+      const { transcript, discoveredSpeakers } = await this.localPipeline.transcribe({
+        audioPath: audioFullPath,
+        language: options.language,
+        enrolledSpeakers,
+        similarityThreshold: options.similarityThreshold
+      });
+
+      // 3. Write artifacts to disk
+      const paths = ensureMeetingFolder(
+        meetingPaths(this.meetingsDir, meeting.start_time, meeting.title, meeting.id)
+      );
+
+      const transcriptText = transcriptToText(transcript);
+      const transcriptJson = `${JSON.stringify(transcript, null, 2)}\n`;
+
+      const jsonArtifactId = await this.ensureArtifact(
+        meeting.id,
+        recording.id,
+        "transcript",
+        "json",
+        "transcripts/local.json",
+        transcriptJson,
+        paths.transcriptsDir,
+        PROVIDER_LOCAL
+      );
+
+      const txtArtifactId = await this.ensureArtifact(
+        meeting.id,
+        recording.id,
+        "transcript",
+        "txt",
+        "transcripts/local.txt",
+        `${transcriptText}\n`,
+        paths.transcriptsDir,
+        PROVIDER_LOCAL
+      );
+
+      // 4. Persist discovered/updated speakers & links
+      await this.persistLocalDiscoveredSpeakers(
+        meeting.id,
+        jsonArtifactId,
+        discoveredSpeakers
+      );
+
+      const completedAt = this.now();
+
+      // 5. Update meeting primary transcript artifact
+      await this.db
+        .updateTable("meetings")
+        .set({
+          primary_transcript_artifact_id: jsonArtifactId,
+          status: "ready",
+          last_error: null,
+          updated_at: completedAt
+        })
+        .where("id", "=", meeting.id)
+        .execute();
+
+      // 6. Mark stage run as done
+      await this.db
+        .updateTable("stage_runs")
+        .set({
+          status: "done",
+          last_error: null,
+          finished_at: completedAt,
+          updated_at: completedAt
+        })
+        .where("id", "=", stageRunId)
+        .execute();
+
+      return {
+        stageRunId,
+        jobId: `local-${stageRunId.slice(0, 8)}`,
+        status: "done",
+        transcriptArtifactId: jsonArtifactId,
+        transcriptTextArtifactId: txtArtifactId
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error("Failed to run local transcription", { meetingId, error: errorMsg });
+
+      const errTime = this.now();
+      await this.db
+        .updateTable("stage_runs")
+        .set({
+          status: "error",
+          last_error: errorMsg,
+          finished_at: errTime,
+          updated_at: errTime
+        })
+        .where("id", "=", stageRunId)
+        .execute();
+
+      await this.db
+        .updateTable("meetings")
+        .set({ last_error: errorMsg, updated_at: errTime })
+        .where("id", "=", meetingId)
+        .execute();
+
+      return {
+        stageRunId,
+        jobId: "",
+        status: "error",
+        error: errorMsg
+      };
+    }
+  }
+
+  async transcribeMeetingSpeechmatics(
     meetingId: string,
     options: TranscribeMeetingOptions = {}
   ): Promise<TranscribeMeetingResult> {
@@ -350,7 +592,8 @@ export class TranscriptionService {
       "json",
       "transcripts/speechmatics.json",
       transcriptJson,
-      paths.transcriptsDir
+      paths.transcriptsDir,
+      PROVIDER_SPEECHMATICS
     );
 
     const txtArtifactId = await this.ensureArtifact(
@@ -360,7 +603,8 @@ export class TranscriptionService {
       "txt",
       "transcripts/speechmatics.txt",
       `${transcriptText}\n`,
-      paths.transcriptsDir
+      paths.transcriptsDir,
+      PROVIDER_SPEECHMATICS
     );
 
     // Save discovered speakers & links
@@ -420,7 +664,8 @@ export class TranscriptionService {
     format: "json" | "txt" | "md",
     relativePath: string,
     content: string,
-    directory: string
+    directory: string,
+    provider: string
   ): Promise<string> {
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, relativePath.split("/").at(-1)!), content, "utf8");
@@ -429,7 +674,7 @@ export class TranscriptionService {
       .selectFrom("artifacts")
       .select("id")
       .where("meeting_id", "=", meetingId)
-      .where("provider", "=", PROVIDER_SPEECHMATICS)
+      .where("provider", "=", provider)
       .where("kind", "=", kind)
       .where("format", "=", format)
       .where("path", "=", relativePath)
@@ -447,7 +692,7 @@ export class TranscriptionService {
         meeting_id: meetingId,
         recording_id: recordingId,
         kind,
-        provider: PROVIDER_SPEECHMATICS,
+        provider,
         format,
         path: relativePath,
         created_at: this.now()
@@ -455,6 +700,67 @@ export class TranscriptionService {
       .execute();
 
     return id;
+  }
+
+  private async persistLocalDiscoveredSpeakers(
+    meetingId: string,
+    evidenceArtifactId: string,
+    discoveredSpeakers: DiscoveredSpeakerVoiceprint[]
+  ): Promise<void> {
+    const currentTime = this.now();
+
+    for (const discovered of discoveredSpeakers) {
+      const allSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
+      const normalizedName = discovered.name.trim().toLocaleLowerCase();
+      const existing = allSpeakers.find(
+        (speaker) => speaker.name.trim().toLocaleLowerCase() === normalizedName
+      );
+
+      const speakerId = existing?.id ?? (discovered.isEnrolled ? discovered.speakerId : randomUUID());
+      const voiceprintJson = JSON.stringify(discovered.voiceprint);
+
+      if (existing) {
+        const providerIds = parseJsonField<Record<string, string[]>>(existing.provider_ids, {});
+        providerIds[PROVIDER_LOCAL] = [voiceprintJson];
+
+        await this.db
+          .updateTable("speakers")
+          .set({
+            provider_ids: JSON.stringify(providerIds),
+            enrolled_at: existing.enrolled_at ?? currentTime
+          })
+          .where("id", "=", existing.id)
+          .execute();
+      } else {
+        const providerIds: Record<string, string[]> = {
+          [PROVIDER_LOCAL]: [voiceprintJson]
+        };
+
+        await this.db
+          .insertInto("speakers")
+          .values({
+            id: speakerId,
+            name: discovered.name,
+            provider_ids: JSON.stringify(providerIds),
+            enrolled_at: currentTime,
+            enrollment_clip_paths: "[]",
+            created_at: currentTime
+          })
+          .execute();
+      }
+
+      await this.db
+        .insertInto("meeting_speakers")
+        .values({
+          meeting_id: meetingId,
+          speaker_id: speakerId,
+          evidence_artifact_id: evidenceArtifactId
+        })
+        .onConflict((conflict) =>
+          conflict.columns(["meeting_id", "speaker_id"]).doUpdateSet({ evidence_artifact_id: evidenceArtifactId })
+        )
+        .execute();
+    }
   }
 
   private async persistDiscoveredSpeakers(
@@ -538,6 +844,15 @@ export class TranscriptionService {
         )
         .execute();
     }
+  }
+
+  private async getEnrolledSpeakers(): Promise<EnrolledSpeaker[]> {
+    const rows = await this.db.selectFrom("speakers").selectAll().execute();
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      providerIds: parseJsonField<Record<string, string[]>>(row.provider_ids, {})
+    }));
   }
 
   private async getEnrolledSpeechmaticsSpeakers(): Promise<EnrolledSpeaker[]> {

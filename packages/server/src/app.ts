@@ -120,7 +120,15 @@ export function createApp(options: AppOptions = {}): Hono {
 
   app.post("/api/meetings/:id/transcribe", async (c) => {
     const meetingId = c.req.param("id");
-    let body: { language?: string; poll?: boolean; force?: boolean; pollIntervalMs?: number; maxPollWaitMs?: number } = {};
+    let body: {
+      provider?: "speechmatics" | "local";
+      language?: string;
+      poll?: boolean;
+      force?: boolean;
+      pollIntervalMs?: number;
+      maxPollWaitMs?: number;
+      similarityThreshold?: number;
+    } = {};
     try {
       body = (await c.req.json()) as typeof body;
     } catch {
@@ -129,11 +137,13 @@ export function createApp(options: AppOptions = {}): Hono {
 
     try {
       const result = await transcriptionService.transcribeMeeting(meetingId, {
+        provider: body.provider,
         language: body.language,
         poll: body.poll,
         force: body.force,
         pollIntervalMs: body.pollIntervalMs,
-        maxPollWaitMs: body.maxPollWaitMs
+        maxPollWaitMs: body.maxPollWaitMs,
+        similarityThreshold: body.similarityThreshold
       });
 
       return c.json(result, result.status === "error" ? 502 : 200);
@@ -201,6 +211,7 @@ export function createApp(options: AppOptions = {}): Hono {
     const name = formData.get("name");
     const file = formData.get("file");
     const speakerId = formData.get("speakerId");
+    const provider = formData.get("provider");
     const language = formData.get("language");
 
     if (!name || typeof name !== "string" || !name.trim()) {
@@ -222,10 +233,46 @@ export function createApp(options: AppOptions = {}): Hono {
         mime,
         filename,
         speakerId: typeof speakerId === "string" ? speakerId : undefined,
+        provider: typeof provider === "string" ? (provider as "speechmatics" | "local" | "both") : undefined,
         language: typeof language === "string" ? language : undefined
       });
 
       return c.json({ status: "enrolled", speaker });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/speakers/backfill", async (c) => {
+    let body: { speakerId?: string; force?: boolean } = {};
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {}
+
+    try {
+      const result = await speakerService.backfillVoiceprints({
+        speakerId: body.speakerId,
+        force: body.force
+      });
+      return c.json({ status: "completed", ...result });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/speakers/:id/backfill", async (c) => {
+    const id = c.req.param("id");
+    let body: { force?: boolean } = {};
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {}
+
+    try {
+      const result = await speakerService.backfillVoiceprints({
+        speakerId: id,
+        force: body.force
+      });
+      return c.json({ status: "completed", ...result });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }

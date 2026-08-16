@@ -560,6 +560,7 @@ function MeetingDetailView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [transcribing, setTranscribing] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState<"local" | "speechmatics">("local");
   const [reassigningSpeaker, setReassigningSpeaker] = useState<string | null>(null);
 
   const fetchDetail = async () => {
@@ -586,7 +587,7 @@ function MeetingDetailView({
       const res = await fetch(`/api/meetings/${meetingId}/transcribe`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ poll: true, force: true })
+        body: JSON.stringify({ provider: selectedProvider, poll: true, force: true })
       });
       if (!res.ok) {
         const data = await res.json();
@@ -653,13 +654,21 @@ function MeetingDetailView({
               </div>
             </div>
             <div className="flex items-center gap-3">
+              <select
+                value={selectedProvider}
+                onChange={(e) => setSelectedProvider(e.target.value as "local" | "speechmatics")}
+                className="rounded-lg border border-stone-800 bg-stone-900 px-3 py-2 text-xs text-stone-200 focus:border-lime-400 focus:outline-none"
+              >
+                <option value="local">Local SOTA (Cohere 2B + Diarization)</option>
+                <option value="speechmatics">Speechmatics (Cloud)</option>
+              </select>
               <button
                 type="button"
                 disabled={transcribing}
                 onClick={() => void handleTriggerTranscription()}
                 className="rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-50"
               >
-                {transcribing ? "Transcribing with Speechmatics…" : "Transcribe / Retranscribe"}
+                {transcribing ? "Transcribing…" : "Transcribe"}
               </button>
             </div>
           </header>
@@ -894,6 +903,21 @@ function SpeakersListView({
   const [editingName, setEditingName] = useState("");
   const [mergingId, setMergingId] = useState<string | null>(null);
   const [targetMergeId, setTargetMergeId] = useState("");
+  const [syncing, setSyncing] = useState(false);
+
+  const handleBackfill = async () => {
+    setSyncing(true);
+    try {
+      const res = await fetch("/api/speakers/backfill", { method: "POST" });
+      if (res.ok) {
+        onRefresh();
+      }
+    } catch {
+      alert("Failed to backfill voiceprints");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleRename = async (id: string) => {
     if (!editingName.trim()) return;
@@ -944,11 +968,23 @@ function SpeakersListView({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">People & Voiceprints</h1>
-        <p className="mt-1 text-sm text-stone-400">
-          Recognized speakers and their persistent voice identifiers learned from meetings.
-        </p>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">People & Voiceprints</h1>
+          <p className="mt-1 text-sm text-stone-400">
+            Recognized speakers and their persistent voice identifiers learned from meetings.
+          </p>
+        </div>
+        <div>
+          <button
+            type="button"
+            disabled={syncing}
+            onClick={() => void handleBackfill()}
+            className="rounded-lg border border-stone-700 bg-stone-900 px-3.5 py-1.5 text-xs font-semibold text-stone-200 hover:border-lime-400 hover:text-lime-300 transition disabled:opacity-50"
+          >
+            {syncing ? "Syncing Voiceprints…" : "Sync & Cross-fill Voiceprints"}
+          </button>
+        </div>
       </div>
 
       {speakers.length === 0 ? (
@@ -960,7 +996,8 @@ function SpeakersListView({
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {speakers.map((s) => {
-            const hasVoiceprint = (s.providerIds.speechmatics?.length ?? 0) > 0;
+            const hasSmVoiceprint = (s.providerIds.speechmatics?.length ?? 0) > 0;
+            const hasLocalVoiceprint = (s.providerIds.local?.length ?? 0) > 0;
             return (
               <div
                 key={s.id}
@@ -999,21 +1036,29 @@ function SpeakersListView({
                         </button>
                       </h2>
                     )}
-                    <span
-                      className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                        hasVoiceprint
-                          ? "bg-lime-400/10 text-lime-300 border border-lime-400/20"
-                          : "bg-stone-800 text-stone-400"
-                      }`}
-                    >
-                      {hasVoiceprint ? "Voiceprint Active" : "Discovered"}
-                    </span>
+                    <div className="flex flex-col gap-1 items-end">
+                      {hasLocalVoiceprint && (
+                        <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-lime-400/10 text-lime-300 border border-lime-400/20">
+                          Local Vector Active
+                        </span>
+                      )}
+                      {hasSmVoiceprint && (
+                        <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-400/10 text-blue-300 border border-blue-400/20">
+                          Speechmatics Active
+                        </span>
+                      )}
+                      {!hasLocalVoiceprint && !hasSmVoiceprint && (
+                        <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-stone-800 text-stone-400">
+                          Discovered
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <div className="mt-3 space-y-1 text-xs text-stone-400">
                     <p>Participated in: <span className="font-semibold text-stone-200">{s.meetingCount} meeting(s)</span></p>
-                    {hasVoiceprint && (
-                      <p>Speechmatics identifiers: <span className="font-mono text-stone-300">{s.providerIds.speechmatics!.length}</span></p>
+                    {s.enrollmentClipPaths?.length > 0 && (
+                      <p>Stored clips: <span className="font-semibold text-stone-300">{s.enrollmentClipPaths.length}</span></p>
                     )}
                     {s.enrolledAt && (
                       <p>Last learned: {formatDate(s.enrolledAt)}</p>

@@ -11,12 +11,14 @@
     "start": "bun run src/index.ts"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@mcowger/plaud-client": "^0.1.0",
     "@olive/shared": "workspace:*",
     "@speechmatics/batch-client": "^5.4.2",
     "hono": "^4.13.1",
     "kysely": "^0.28.17",
     "kysely-bun-sqlite": "^0.4.0",
+    "sherpa-onnx-node": "^1.13.5",
     "zod": "^4.4.3"
   }
 }

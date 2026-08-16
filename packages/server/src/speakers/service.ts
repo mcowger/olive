@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Kysely } from "kysely";
@@ -8,6 +9,16 @@ import { SpeechmaticsClient } from "../providers/speechmatics/client.ts";
 import type { SpeechmaticsJsonV2 } from "../providers/speechmatics/types.ts";
 import { meetingPaths } from "../layout.ts";
 import { transcriptToText } from "../providers/speechmatics/normalize.ts";
+import {
+  AcousticFeatureEmbeddingExtractor,
+  decodeWav,
+  encodeWav,
+  mergeVoiceprintVectors,
+  normalizeVector,
+  resample,
+  updateVoiceprintCentroid,
+  type VoiceprintVector
+} from "../providers/local/index.ts";
 
 export interface SpeakerServiceOptions {
   db: Kysely<Database>;
@@ -24,6 +35,7 @@ export interface EnrollSpeakerOptions {
   mime?: string;
   filename?: string;
   speakerId?: string;
+  provider?: "speechmatics" | "local" | "both";
   language?: string;
   pollIntervalMs?: number;
   maxPollWaitMs?: number;
@@ -42,6 +54,17 @@ export interface ReassignMeetingSpeakerResult {
   transcript: Transcript;
   updatedSegmentsCount: number;
   extractedVoiceprintsCount: number;
+}
+
+export interface BackfillVoiceprintsOptions {
+  speakerId?: string;
+  force?: boolean;
+}
+
+export interface BackfillVoiceprintsResult {
+  processed: number;
+  updated: number;
+  speakers: Speaker[];
 }
 
 export interface SpeakerWithStats extends Speaker {
@@ -78,6 +101,7 @@ export class SpeakerService {
   private readonly configDir: string;
   private readonly meetingsDir?: string;
   private readonly client: SpeechmaticsClient;
+  private readonly localEmbeddingExtractor: AcousticFeatureEmbeddingExtractor;
   private readonly logger: Logger;
   private readonly now: () => number;
 
@@ -86,6 +110,7 @@ export class SpeakerService {
     this.configDir = options.configDir;
     this.meetingsDir = options.meetingsDir;
     this.client = options.speechmaticsClient ?? new SpeechmaticsClient();
+    this.localEmbeddingExtractor = new AcousticFeatureEmbeddingExtractor(192);
     this.logger = options.logger ?? defaultLogger;
     this.now = options.now ?? Date.now;
   }
@@ -140,6 +165,152 @@ export class SpeakerService {
         title: m.title,
         startTime: m.start_time
       }))
+    };
+  }
+
+  /**
+   * Cross-fills voiceprints across providers for all or specific speakers.
+   * If a speaker has enrollment clips on disk:
+   * - Computes and populates local voiceprints if missing or out-of-date.
+   * - Submits enrollment to Speechmatics if missing and client is configured.
+   */
+  async backfillVoiceprints(
+    options: BackfillVoiceprintsOptions = {}
+  ): Promise<BackfillVoiceprintsResult> {
+    const currentTime = this.now();
+    let query = this.db.selectFrom("speakers").selectAll();
+    if (options.speakerId) {
+      query = query.where("id", "=", options.speakerId);
+    }
+
+    const rows = await query.execute();
+    const updatedSpeakers: Speaker[] = [];
+    let updatedCount = 0;
+
+    for (const row of rows) {
+      const providerIds = parseJsonField<Record<string, string[]>>(row.provider_ids, {});
+      const clips = parseJsonField<string[]>(row.enrollment_clip_paths, []);
+      let changed = false;
+
+      // 1. Cross-fill Local Voiceprint from saved audio clips if missing or forced
+      if (clips.length > 0 && (!providerIds.local?.length || options.force)) {
+        const clipVectors: VoiceprintVector[] = [];
+        for (const relPath of clips) {
+          const fullPath = join(this.configDir, relPath);
+          if (existsSync(fullPath)) {
+            try {
+              const fileBytes = new Uint8Array(await readFile(fullPath));
+              if (fileBytes.byteLength >= 44) {
+                let decoded = decodeWav(fileBytes);
+                let samples = decoded.samples;
+                if (decoded.sampleRate !== 16000) {
+                  samples = resample(samples, decoded.sampleRate, 16000);
+                }
+                const emb = await this.localEmbeddingExtractor.extract(samples, 16000);
+                clipVectors.push(emb);
+              }
+            } catch (err) {
+              this.logger.warn("Failed to extract local voiceprint from stored clip during backfill", {
+                path: fullPath,
+                error: err instanceof Error ? err.message : String(err)
+              });
+            }
+          }
+        }
+
+        if (clipVectors.length > 0) {
+          const merged = mergeVoiceprintVectors(clipVectors);
+          providerIds.local = [JSON.stringify(merged)];
+          changed = true;
+        }
+      }
+
+      // 2. Cross-fill Speechmatics voiceprint from saved audio clips if missing and key is present
+      if (
+        clips.length > 0 &&
+        (!providerIds.speechmatics?.length || options.force) &&
+        process.env.SPEECHMATICS_API_KEY
+      ) {
+        const extractedSmIds: string[] = [];
+        for (const relPath of clips) {
+          const fullPath = join(this.configDir, relPath);
+          if (existsSync(fullPath)) {
+            try {
+              const fileBytes = new Uint8Array(await readFile(fullPath));
+              const submitResult = await this.client.submitJob({
+                audio: fileBytes,
+                filename: relPath.split("/").at(-1) || "clip.wav",
+                mime: "audio/wav",
+                language: "en",
+                getSpeakers: true
+              });
+
+              const startTime = this.now();
+              while (this.now() - startTime < 120_000) {
+                const status = await this.client.getJob(submitResult.id);
+                if (status.status === "done") {
+                  const jsonV2 = (await this.client.getTranscript(submitResult.id, "json-v2")) as SpeechmaticsJsonV2;
+                  for (const s of (jsonV2.speakers ?? []) as any[]) {
+                    const ids = Array.isArray(s.speaker_identifiers)
+                      ? s.speaker_identifiers
+                      : Array.from(s.speaker_identifiers ?? []);
+                    for (const id of ids as string[]) {
+                      if (id && !extractedSmIds.includes(id)) {
+                        extractedSmIds.push(id);
+                      }
+                    }
+                  }
+                  try {
+                    await this.client.deleteJob(submitResult.id);
+                  } catch {}
+                  break;
+                }
+                if (status.status === "rejected" || status.status === "deleted") {
+                  break;
+                }
+                await new Promise((res) => setTimeout(res, 2000));
+              }
+            } catch (err) {
+              this.logger.warn("Failed to cross-fill Speechmatics voiceprint from clip", {
+                path: fullPath,
+                error: err instanceof Error ? err.message : String(err)
+              });
+            }
+          }
+        }
+
+        if (extractedSmIds.length > 0) {
+          providerIds.speechmatics = extractedSmIds;
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        await this.db
+          .updateTable("speakers")
+          .set({
+            provider_ids: JSON.stringify(providerIds),
+            enrolled_at: row.enrolled_at ?? currentTime
+          })
+          .where("id", "=", row.id)
+          .execute();
+
+        updatedCount++;
+      }
+
+      const updatedRow = await this.db
+        .selectFrom("speakers")
+        .selectAll()
+        .where("id", "=", row.id)
+        .executeTakeFirstOrThrow();
+
+      updatedSpeakers.push(toSpeaker(updatedRow));
+    }
+
+    return {
+      processed: rows.length,
+      updated: updatedCount,
+      speakers: updatedSpeakers
     };
   }
 
@@ -269,8 +440,13 @@ export class SpeakerService {
       // Canonical Transcript format
       const segments: any[] = parsedData.segments ?? [];
 
-      // 3. Adopt voiceprint from the meeting transcript metadata if requested
+      // 3. Adopt voiceprints across BOTH Speechmatics and Local providers if requested
       if (adoptVoiceprint) {
+        const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
+        const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
+        let adoptedAny = false;
+
+        // A. Adopt Speechmatics voiceprint identifiers if in transcript metadata
         const extractedIds: string[] = [];
         const speakerList = (parsedData.speakers ?? []) as any[];
 
@@ -289,18 +465,100 @@ export class SpeakerService {
         }
 
         if (extractedIds.length > 0) {
-          extractedVoiceprintsCount = extractedIds.length;
-          const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
+          extractedVoiceprintsCount += extractedIds.length;
           const currentSmIds = new Set(providerIds.speechmatics ?? []);
           for (const id of extractedIds) {
             currentSmIds.add(id);
           }
           providerIds.speechmatics = Array.from(currentSmIds);
+          adoptedAny = true;
+        }
 
+        // B. Extract speaker's audio from recording on disk to compute Local voiceprint and save clip
+        const recording = await this.db
+          .selectFrom("recordings")
+          .selectAll()
+          .where("meeting_id", "=", meetingId)
+          .orderBy("created_at", "asc")
+          .executeTakeFirst();
+
+        if (recording) {
+          const audioFullPath = join(folder, recording.path);
+          if (existsSync(audioFullPath)) {
+            try {
+              const audioBytes = new Uint8Array(await readFile(audioFullPath));
+              if (audioBytes.byteLength >= 44) {
+                const decoded = decodeWav(audioBytes);
+                let fullSamples = decoded.samples;
+                if (decoded.sampleRate !== 16000) {
+                  fullSamples = resample(fullSamples, decoded.sampleRate, 16000);
+                }
+
+                // Slice audio from matching speaker segments
+                const matchingSegments = segments.filter(
+                  (s) => (s.speaker || "").trim().toLowerCase() === normalizedFrom
+                );
+
+                const speakerSampleChunks: Float32Array[] = [];
+                for (const seg of matchingSegments) {
+                  const sStart = Math.floor((seg.startMs / 1000) * 16000);
+                  const sEnd = Math.min(fullSamples.length, Math.floor((seg.endMs / 1000) * 16000));
+                  if (sEnd > sStart) {
+                    speakerSampleChunks.push(fullSamples.subarray(sStart, sEnd));
+                  }
+                }
+
+                if (speakerSampleChunks.length > 0) {
+                  const totalLength = speakerSampleChunks.reduce((acc, c) => acc + c.length, 0);
+                  const mergedSamples = new Float32Array(totalLength);
+                  let offset = 0;
+                  for (const c of speakerSampleChunks) {
+                    mergedSamples.set(c, offset);
+                    offset += c.length;
+                  }
+
+                  // 1. Compute and update local voiceprint
+                  const newLocalEmbedding = await this.localEmbeddingExtractor.extract(mergedSamples, 16000);
+                  const existingLocalVec = providerIds.local?.[0]
+                    ? JSON.parse(providerIds.local[0])
+                    : undefined;
+
+                  const updatedLocalVec = existingLocalVec
+                    ? updateVoiceprintCentroid(existingLocalVec, newLocalEmbedding)
+                    : newLocalEmbedding;
+
+                  providerIds.local = [JSON.stringify(updatedLocalVec)];
+                  extractedVoiceprintsCount++;
+                  adoptedAny = true;
+
+                  // 2. Save extracted audio slice as an enrollment clip
+                  const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
+                  await mkdir(speakerFolder, { recursive: true });
+                  const clipFilename = `clip_meeting_${meetingId}_${currentTime}.wav`;
+                  const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
+                  const clipWavBytes = encodeWav(mergedSamples, 16000);
+                  await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
+
+                  if (!clips.includes(clipRelativePath)) {
+                    clips.push(clipRelativePath);
+                  }
+                }
+              }
+            } catch (err) {
+              this.logger.warn("Could not extract audio clip during speaker reassignment", {
+                meetingId,
+                error: err instanceof Error ? err.message : String(err)
+              });
+            }
+          }
+        }
+
+        if (adoptedAny) {
           await this.db
             .updateTable("speakers")
             .set({
               provider_ids: JSON.stringify(providerIds),
+              enrollment_clip_paths: JSON.stringify(clips),
               enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
             })
             .where("id", "=", targetSpeakerRow.id)
@@ -339,7 +597,7 @@ export class SpeakerService {
       await writeFile(txtPath, `${transcriptToText(updatedTranscript)}\n`, "utf8");
     }
 
-    // 6. Link target speaker in meeting_speakers
+    // 5. Link target speaker in meeting_speakers
     await this.db
       .insertInto("meeting_speakers")
       .values({
@@ -380,11 +638,31 @@ export class SpeakerService {
     const sourceClips = parseJsonField<string[]>(source.enrollment_clip_paths, []);
     const targetClips = parseJsonField<string[]>(target.enrollment_clip_paths, []);
 
+    // Merge Speechmatics voiceprint identifiers
     const combinedSmIds = new Set([
       ...(targetProviderIds.speechmatics ?? []),
       ...(sourceProviderIds.speechmatics ?? [])
     ]);
-    targetProviderIds.speechmatics = Array.from(combinedSmIds);
+    if (combinedSmIds.size > 0) {
+      targetProviderIds.speechmatics = Array.from(combinedSmIds);
+    }
+
+    // Merge Local voiceprint embedding centroids
+    const localVectors: VoiceprintVector[] = [];
+    if (targetProviderIds.local?.[0]) {
+      try {
+        localVectors.push(JSON.parse(targetProviderIds.local[0]));
+      } catch {}
+    }
+    if (sourceProviderIds.local?.[0]) {
+      try {
+        localVectors.push(JSON.parse(sourceProviderIds.local[0]));
+      } catch {}
+    }
+    if (localVectors.length > 0) {
+      const mergedVector = mergeVoiceprintVectors(localVectors);
+      targetProviderIds.local = [JSON.stringify(mergedVector)];
+    }
 
     const combinedClips = Array.from(new Set([...targetClips, ...sourceClips]));
     const enrolledAt = target.enrolled_at || source.enrolled_at || null;
@@ -465,86 +743,114 @@ export class SpeakerService {
     const clipRelativePath = join("speakers", speakerId, clipFilename);
     await writeFile(join(this.configDir, clipRelativePath), options.audioBytes);
 
-    // 2. Submit enrollment job to Speechmatics with get_speakers: true
-    const submitResult = await this.client.submitJob({
-      audio: options.audioBytes,
-      filename: options.filename || clipFilename,
-      mime: options.mime || "audio/wav",
-      language: options.language || "en",
-      getSpeakers: true
-    });
-
-    // 3. Poll Speechmatics job until completion
-    const pollIntervalMs = options.pollIntervalMs ?? 2000;
-    const maxWaitMs = options.maxPollWaitMs ?? 180_000;
-    const startTime = this.now();
-
-    let jsonV2: SpeechmaticsJsonV2 | undefined;
-
-    while (this.now() - startTime < maxWaitMs) {
-      const status = await this.client.getJob(submitResult.id);
-
-      if (status.status === "done") {
-        jsonV2 = (await this.client.getTranscript(submitResult.id, "json-v2")) as SpeechmaticsJsonV2;
-        break;
-      }
-
-      if (status.status === "rejected" || status.status === "deleted") {
-        const errorMsg =
-          status.errors && status.errors.length > 0
-            ? status.errors.map((e) => e.message).join("; ")
-            : `Enrollment job ${status.status}`;
-        throw new Error(`Speechmatics enrollment failed: ${errorMsg}`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    }
-
-    if (!jsonV2) {
-      throw new Error(`Speechmatics enrollment timed out after ${maxWaitMs}ms`);
-    }
-
-    // 4. Extract generated speaker identifiers
-    const extractedIdentifiers: string[] = [];
-    for (const s of (jsonV2.speakers ?? []) as any[]) {
-      const identifiers =
-        s.speaker_identifiers instanceof Set
-          ? Array.from(s.speaker_identifiers)
-          : Array.isArray(s.speaker_identifiers)
-          ? s.speaker_identifiers
-          : [];
-      for (const id of identifiers) {
-        if (id && !extractedIdentifiers.includes(id)) {
-          extractedIdentifiers.push(id);
-        }
-      }
-    }
-
-    // 5. Delete job from Speechmatics (retention cleanup)
-    try {
-      await this.client.deleteJob(submitResult.id);
-    } catch (err) {
-      this.logger.warn("Failed to delete Speechmatics enrollment job", {
-        jobId: submitResult.id,
-        error: err instanceof Error ? err.message : String(err)
-      });
-    }
-
-    // 6. Update database record
     const existingProviderIds = speakerRow
       ? parseJsonField<Record<string, string[]>>(speakerRow.provider_ids, {})
       : {};
     const existingClips = speakerRow
       ? parseJsonField<string[]>(speakerRow.enrollment_clip_paths, [])
       : [];
-
-    const existingSmIds = new Set(existingProviderIds.speechmatics ?? []);
-    for (const id of extractedIdentifiers) {
-      existingSmIds.add(id);
-    }
-    existingProviderIds.speechmatics = Array.from(existingSmIds);
     existingClips.push(clipRelativePath);
 
+    // Cross-fill by default across both Local & Speechmatics when audio is provided
+    const providerMode = options.provider ?? "both";
+
+    // 2. Extract Local Voiceprint Embedding (cross-filled)
+    if ((providerMode === "local" || providerMode === "both") && options.audioBytes.byteLength >= 44) {
+      try {
+        let decoded = decodeWav(options.audioBytes);
+        let samples = decoded.samples;
+        if (decoded.sampleRate !== 16000) {
+          samples = resample(samples, decoded.sampleRate, 16000);
+        }
+        const localEmbedding = await this.localEmbeddingExtractor.extract(samples, 16000);
+        const existingLocalVec = existingProviderIds.local?.[0]
+          ? JSON.parse(existingProviderIds.local[0])
+          : undefined;
+
+        const updatedLocalVec = existingLocalVec
+          ? updateVoiceprintCentroid(existingLocalVec, localEmbedding)
+          : localEmbedding;
+
+        existingProviderIds.local = [JSON.stringify(updatedLocalVec)];
+      } catch (err) {
+        this.logger.warn("Could not compute local voiceprint from audio clip", {
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+
+    // 3. Submit enrollment job to Speechmatics (cross-filled if available)
+    if (providerMode === "speechmatics" || (providerMode === "both" && process.env.SPEECHMATICS_API_KEY)) {
+      try {
+        const submitResult = await this.client.submitJob({
+          audio: options.audioBytes,
+          filename: options.filename || clipFilename,
+          mime: options.mime || "audio/wav",
+          language: options.language || "en",
+          getSpeakers: true
+        });
+
+        const pollIntervalMs = options.pollIntervalMs ?? 2000;
+        const maxWaitMs = options.maxPollWaitMs ?? 180_000;
+        const startTime = this.now();
+
+        let jsonV2: SpeechmaticsJsonV2 | undefined;
+        while (this.now() - startTime < maxWaitMs) {
+          const status = await this.client.getJob(submitResult.id);
+
+          if (status.status === "done") {
+            jsonV2 = (await this.client.getTranscript(submitResult.id, "json-v2")) as SpeechmaticsJsonV2;
+            break;
+          }
+
+          if (status.status === "rejected" || status.status === "deleted") {
+            const errorMsg =
+              status.errors && status.errors.length > 0
+                ? status.errors.map((e) => e.message).join("; ")
+                : `Enrollment job ${status.status}`;
+            throw new Error(`Speechmatics enrollment failed: ${errorMsg}`);
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        }
+
+        if (jsonV2) {
+          const extractedIdentifiers: string[] = [];
+          for (const s of (jsonV2.speakers ?? []) as any[]) {
+            const identifiers =
+              s.speaker_identifiers instanceof Set
+                ? Array.from(s.speaker_identifiers)
+                : Array.isArray(s.speaker_identifiers)
+                ? s.speaker_identifiers
+                : [];
+            for (const id of identifiers) {
+              if (id && !extractedIdentifiers.includes(id)) {
+                extractedIdentifiers.push(id);
+              }
+            }
+          }
+
+          const existingSmIds = new Set(existingProviderIds.speechmatics ?? []);
+          for (const id of extractedIdentifiers) {
+            existingSmIds.add(id);
+          }
+          existingProviderIds.speechmatics = Array.from(existingSmIds);
+
+          try {
+            await this.client.deleteJob(submitResult.id);
+          } catch {}
+        }
+      } catch (smErr) {
+        if (providerMode === "speechmatics") {
+          throw smErr;
+        }
+        this.logger.warn("Speechmatics enrollment failed during multi-provider enroll", {
+          error: smErr instanceof Error ? smErr.message : String(smErr)
+        });
+      }
+    }
+
+    // 4. Update database record
     if (speakerRow) {
       await this.db
         .updateTable("speakers")

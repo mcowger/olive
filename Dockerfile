@@ -1,32 +1,53 @@
-FROM oven/bun:1 AS build
+# syntax=docker/dockerfile:1
 
+FROM oven/bun:1.3.14 AS base
 WORKDIR /app
-COPY package.json bun.lock tsconfig.json ./
-COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
-COPY packages/server/package.json packages/server/tsconfig.json ./packages/server/
-COPY packages/web/package.json packages/web/tsconfig.json ./packages/web/
+
+# 1. Install system utilities and audio processing dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Copy workspace package manifests to leverage Docker cache for dependencies
+COPY package.json bun.lock ./
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/server/package.json ./packages/server/
+COPY packages/web/package.json ./packages/web/
+
+# Install Node/Bun dependencies
 RUN bun install --frozen-lockfile
 
-COPY packages ./packages
-RUN bun run build
+# 3. Model Pre-download Layer
+# (Positioned BEFORE copying application code so rebuilding code avoids redownloading model weights)
+ENV HF_HOME=/app/.cache/huggingface \
+    TRANSFORMERS_CACHE=/app/.cache/huggingface \
+    OLIVE_CONFIG_DIR=/app/data/config
 
-FROM oven/bun:1
+COPY scripts/download-models.ts ./scripts/
+RUN bun run scripts/download-models.ts
 
-WORKDIR /app
-COPY --from=build /app/package.json /app/bun.lock /app/tsconfig.json ./
-COPY --from=build /app/packages/shared/package.json /app/packages/shared/tsconfig.json ./packages/shared/
-COPY --from=build /app/packages/server/package.json /app/packages/server/tsconfig.json ./packages/server/
-COPY --from=build /app/packages/web/package.json /app/packages/web/tsconfig.json ./packages/web/
-RUN bun install --frozen-lockfile --production
-COPY --from=build /app/packages/shared/src ./packages/shared/src
-COPY --from=build /app/packages/server/src ./packages/server/src
-COPY --from=build /app/packages/web/dist ./packages/web/dist
+# 4. Copy application source code
+COPY tsconfig.json ./
+COPY packages/shared ./packages/shared
+COPY packages/server ./packages/server
+COPY packages/web ./packages/web
 
-ENV OLIVE_CONFIG_DIR=/data/config
-ENV OLIVE_MEETINGS_DIR=/data/meetings
-ENV OLIVE_BIND_HOST=0.0.0.0
-ENV OLIVE_BIND_PORT=4471
-VOLUME ["/data"]
-EXPOSE 4471
+# Build static web frontend
+RUN bun run build:web
+
+# 5. Production Runtime Configuration
+ENV NODE_ENV=production \
+    PORT=4470 \
+    OLIVE_DATA_DIR=/app/data \
+    OLIVE_CONFIG_DIR=/app/data/config \
+    OLIVE_MEETINGS_DIR=/app/data/meetings \
+    HF_HOME=/app/.cache/huggingface \
+    TRANSFORMERS_CACHE=/app/.cache/huggingface
+
+EXPOSE 4470
+
+VOLUME ["/app/data"]
 
 CMD ["bun", "run", "packages/server/src/index.ts"]

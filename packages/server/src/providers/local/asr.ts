@@ -40,7 +40,10 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
 
     this.isInitializing = true;
     try {
-      const { pipeline } = await import("@huggingface/transformers");
+      const { pipeline, env } = await import("@huggingface/transformers");
+      if (process.env.TRANSFORMERS_CACHE || process.env.HF_HOME) {
+        env.cacheDir = process.env.TRANSFORMERS_CACHE || process.env.HF_HOME || null;
+      }
       this.pipelineInstance = await pipeline(
         "automatic-speech-recognition",
         this.config.modelId!,

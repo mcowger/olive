@@ -1,9 +1,8 @@
+node_modules
+dist
 .git
 .env
-.agents
-node_modules
-**/node_modules
-packages/web/dist
-*.sqlite
-*.sqlite-shm
-*.sqlite-wal
+.env.*
+data
+/tmp
+*.log

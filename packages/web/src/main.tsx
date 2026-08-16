@@ -1037,6 +1037,7 @@ function GenerateSummaryModal({
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [selectedProvider, setSelectedProvider] = useState<string>("google");
   const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash");
+  const [thinkingLevel, setThinkingLevel] = useState<string>("low");
   const [setPrimary, setSetPrimary] = useState(true);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -1070,6 +1071,7 @@ function GenerateSummaryModal({
           const cData = await configRes.json();
           if (cData.defaultProvider) setSelectedProvider(cData.defaultProvider);
           if (cData.defaultModel) setSelectedModel(cData.defaultModel);
+          if (cData.defaultThinkingLevel) setThinkingLevel(cData.defaultThinkingLevel);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -1085,6 +1087,18 @@ function GenerateSummaryModal({
     const pModels = models.filter((m) => m.provider === pId);
     if (pModels.length > 0) {
       setSelectedModel(pModels[0].id);
+      const supported = pModels[0].supportedThinkingLevels || ["low", "medium", "high"];
+      setThinkingLevel(supported.includes("off") ? "off" : supported[0] || "low");
+    }
+  };
+
+  const handleModelChange = (mId: string) => {
+    setSelectedModel(mId);
+    const m = models.find((mod) => mod.provider === selectedProvider && mod.id === mId);
+    if (m?.supportedThinkingLevels) {
+      if (!m.supportedThinkingLevels.includes(thinkingLevel as any)) {
+        setThinkingLevel(m.supportedThinkingLevels[0] || "low");
+      }
     }
   };
 
@@ -1101,6 +1115,7 @@ function GenerateSummaryModal({
           templateId: selectedTemplateId || undefined,
           provider: selectedProvider,
           model: selectedModel,
+          thinkingLevel: selectedModelObj?.reasoning ? thinkingLevel : undefined,
           setPrimary
         })
       });
@@ -1119,6 +1134,7 @@ function GenerateSummaryModal({
 
   const providers = Array.from(new Set(models.map((m) => m.provider)));
   const providerModels = models.filter((m) => m.provider === selectedProvider);
+  const selectedModelObj = models.find((m) => m.provider === selectedProvider && m.id === selectedModel);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto">
@@ -1185,7 +1201,7 @@ function GenerateSummaryModal({
                 </label>
                 <select
                   value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
+                  onChange={(e) => handleModelChange(e.target.value)}
                   className="w-full rounded-lg border border-stone-700 bg-stone-950 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none"
                 >
                   {providerModels.map((m) => (
@@ -1196,6 +1212,25 @@ function GenerateSummaryModal({
                 </select>
               </div>
             </div>
+
+            {selectedModelObj && selectedModelObj.reasoning && (
+              <div className="space-y-1">
+                <label className="text-xs font-medium uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
+                  <span>🧠 Thinking / Reasoning Level</span>
+                </label>
+                <select
+                  value={thinkingLevel}
+                  onChange={(e) => setThinkingLevel(e.target.value)}
+                  className="w-full rounded-lg border border-stone-700 bg-stone-950 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none capitalize"
+                >
+                  {(selectedModelObj.supportedThinkingLevels || ["low", "medium", "high"]).map((lvl) => (
+                    <option key={lvl} value={lvl}>
+                      {lvl === "off" ? "Off (Standard Response)" : `${lvl.charAt(0).toUpperCase() + lvl.slice(1)} Thinking`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div className="flex items-center gap-2 pt-1">
               <input
@@ -2249,6 +2284,7 @@ function LlmSettingsModal({
   const [models, setModels] = useState<LlmModelCatalogItem[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<string>("google");
   const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash");
+  const [thinkingLevel, setThinkingLevel] = useState<string>("off");
   const [apiKey, setApiKey] = useState<string>("");
   const [baseUrl, setBaseUrl] = useState<string>("");
   const [loading, setLoading] = useState(true);
@@ -2273,6 +2309,9 @@ function LlmSettingsModal({
         const config = await configRes.json();
         setSelectedProvider(config.defaultProvider || "google");
         setSelectedModel(config.defaultModel || "gemini-2.5-flash");
+        if (config.defaultThinkingLevel) {
+          setThinkingLevel(config.defaultThinkingLevel);
+        }
         const provConfig = config.providers?.[config.defaultProvider || "google"];
         setBaseUrl(provConfig?.baseUrl || "");
       }
@@ -2303,6 +2342,19 @@ function LlmSettingsModal({
     const providerModels = models.filter((m) => m.provider === pId);
     if (providerModels.length > 0) {
       setSelectedModel(providerModels[0].id);
+      const supported = providerModels[0].supportedThinkingLevels || ["low", "medium", "high"];
+      setThinkingLevel(supported.includes("off") ? "off" : supported[0] || "low");
+    }
+  };
+
+  const handleModelChange = (mId: string) => {
+    setSelectedModel(mId);
+    setTestResult(null);
+    const m = models.find((mod) => mod.provider === selectedProvider && mod.id === mId);
+    if (m?.supportedThinkingLevels) {
+      if (!m.supportedThinkingLevels.includes(thinkingLevel as any)) {
+        setThinkingLevel(m.supportedThinkingLevels[0] || "low");
+      }
     }
   };
 
@@ -2335,7 +2387,8 @@ function LlmSettingsModal({
           provider: selectedProvider,
           model: selectedModel,
           apiKey: apiKey.trim() || undefined,
-          baseUrl: baseUrl.trim() || undefined
+          baseUrl: baseUrl.trim() || undefined,
+          thinkingLevel: selectedModelObj?.reasoning ? thinkingLevel : undefined
         })
       });
 
@@ -2370,6 +2423,7 @@ function LlmSettingsModal({
       const payload: Record<string, any> = {
         defaultProvider: selectedProvider,
         defaultModel: selectedModel,
+        defaultThinkingLevel: selectedModelObj?.reasoning ? thinkingLevel : "off",
         providers: {
           [selectedProvider]: {
             ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
@@ -2403,6 +2457,7 @@ function LlmSettingsModal({
     return m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q);
   });
 
+  const selectedModelObj = models.find((m) => m.provider === selectedProvider && m.id === selectedModel);
   const currentProviderSummary = providers.find((p) => p.id === selectedProvider);
 
   return (
@@ -2476,7 +2531,7 @@ function LlmSettingsModal({
                 />
                 <select
                   value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
+                  onChange={(e) => handleModelChange(e.target.value)}
                   className="w-full rounded-lg border border-stone-700 bg-stone-950 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none"
                 >
                   {filteredModels.map((m) => (
@@ -2487,6 +2542,25 @@ function LlmSettingsModal({
                 </select>
               </div>
             </div>
+
+            {selectedModelObj && selectedModelObj.reasoning && (
+              <div className="space-y-1">
+                <label className="text-xs font-medium uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
+                  <span>🧠 Thinking / Reasoning Level</span>
+                </label>
+                <select
+                  value={thinkingLevel}
+                  onChange={(e) => setThinkingLevel(e.target.value)}
+                  className="w-full rounded-lg border border-stone-700 bg-stone-950 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none capitalize"
+                >
+                  {(selectedModelObj.supportedThinkingLevels || ["low", "medium", "high"]).map((lvl) => (
+                    <option key={lvl} value={lvl}>
+                      {lvl === "off" ? "Off (Standard Response)" : `${lvl.charAt(0).toUpperCase() + lvl.slice(1)} Thinking`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase tracking-wider text-stone-400">

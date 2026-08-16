@@ -114,7 +114,7 @@ describe("LlmService", () => {
       provider: "google",
       model: "gemini-2.5-flash",
       prompt: "Reply with strictly the word: PONG",
-      maxTokens: 10
+      maxTokens: 100
     });
 
     expect(result.text).toBeDefined();
@@ -122,6 +122,17 @@ describe("LlmService", () => {
     expect(result.provider).toBe("google");
     expect(result.usage.inputTokens).toBeGreaterThan(0);
     expect(result.usage.outputTokens).toBeGreaterThan(0);
+
+    // Test Gemini 3.7 Flash thinking level handling
+    const result37 = await service.generateText({
+      provider: "google",
+      model: "gemini-3.7-flash",
+      prompt: "Reply with strictly the word: PONG",
+      thinkingLevel: "low",
+      maxTokens: 100
+    });
+
+    expect(result37.text.trim().toLowerCase()).toContain("pong");
   });
 
   test("throws informative error when API key is missing", async () => {

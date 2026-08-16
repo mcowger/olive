@@ -165,9 +165,20 @@ export const llmCustomModelSchema = z.object({
   reasoning: z.boolean().optional()
 });
 
+export const llmThinkingLevelSchema = z.enum([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+
 export const llmSettingsSchema = z.object({
   defaultProvider: z.string().default("google"),
   defaultModel: z.string().default("gemini-2.5-flash"),
+  defaultThinkingLevel: llmThinkingLevelSchema.optional().default("off"),
   providers: z.record(z.string(), llmProviderConfigSchema).default({}),
   customModels: z.array(llmCustomModelSchema).default([])
 });
@@ -175,6 +186,7 @@ export const llmSettingsSchema = z.object({
 export const updateLlmSettingsInputSchema = z.object({
   defaultProvider: z.string().optional(),
   defaultModel: z.string().optional(),
+  defaultThinkingLevel: llmThinkingLevelSchema.optional(),
   providers: z.record(z.string(), llmProviderConfigSchema).optional(),
   customModels: z.array(llmCustomModelSchema).optional()
 });
@@ -186,6 +198,7 @@ export const llmGenerateInputSchema = z.object({
   prompt: z.string().min(1, "Prompt is required"),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().positive().optional(),
+  thinkingLevel: llmThinkingLevelSchema.optional(),
   apiKeyOverride: z.string().optional(),
   baseUrlOverride: z.string().optional()
 });

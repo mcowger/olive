@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type {
   Database,
+  LlmThinkingLevel,
   MeetingDetailAggregate,
   MeetingSummaryItem,
   Template,
@@ -29,6 +30,7 @@ export interface GenerateSummaryOptions {
   templateId?: string;
   provider?: string;
   model?: string;
+  thinkingLevel?: LlmThinkingLevel;
   setPrimary?: boolean;
 }
 
@@ -197,6 +199,7 @@ export class SummaryService {
       llmResult = await this.llmService.generateText({
         provider: options.provider,
         model: options.model,
+        thinkingLevel: options.thinkingLevel,
         systemPrompt: systemPrompt || undefined,
         prompt: userPrompt
       });

@@ -9,6 +9,7 @@ import type {
   LlmModelCatalogItem,
   LlmProviderSummary,
   LlmSettings,
+  LlmThinkingLevel,
   UpdateLlmSettingsInput
 } from "@olive/shared";
 import { llmSettingsSchema } from "@olive/shared";
@@ -17,9 +18,12 @@ import {
 } from "@earendil-works/pi-ai/providers/all";
 import {
   contentText,
+  getSupportedThinkingLevels,
+  clampThinkingLevel,
   type Context,
   type Model,
-  type AssistantMessage
+  type AssistantMessage,
+  type ModelThinkingLevel
 } from "@earendil-works/pi-ai";
 import { getDb } from "../db.ts";
 import { logger } from "../logger.ts";
@@ -125,6 +129,7 @@ export class LlmService {
     return {
       defaultProvider,
       defaultModel,
+      defaultThinkingLevel: "off",
       providers: {},
       customModels: []
     };
@@ -135,6 +140,7 @@ export class LlmService {
     const updated: LlmSettings = {
       defaultProvider: input.defaultProvider ?? current.defaultProvider,
       defaultModel: input.defaultModel ?? current.defaultModel,
+      defaultThinkingLevel: input.defaultThinkingLevel ?? current.defaultThinkingLevel ?? "off",
       providers: {
         ...current.providers,
         ...(input.providers ?? {})
@@ -153,7 +159,8 @@ export class LlmService {
 
     logger.info("Updated LLM settings", {
       defaultProvider: validated.defaultProvider,
-      defaultModel: validated.defaultModel
+      defaultModel: validated.defaultModel,
+      defaultThinkingLevel: validated.defaultThinkingLevel
     });
 
     return validated;
@@ -213,6 +220,66 @@ export class LlmService {
     return { count: this.webCatalog.size };
   }
 
+  getModelSupportedThinkingLevels(model: Model<any>): LlmThinkingLevel[] {
+    if (!model.reasoning) {
+      return ["off"];
+    }
+
+    let rawLevels: string[] = [];
+    try {
+      rawLevels = getSupportedThinkingLevels(model);
+    } catch {
+      rawLevels = ["off", "low", "medium", "high"];
+    }
+
+    // Workaround for Google Gemini 3 models where Google API does not accept "MINIMAL" or "off"
+    if (model.provider === "google" && /gemini-3(?:\.\d+)?-flash/.test(model.id.toLowerCase())) {
+      rawLevels = rawLevels.filter((lvl) => lvl !== "minimal" && lvl !== "off");
+      if (!rawLevels.includes("low")) rawLevels.unshift("low");
+      if (!rawLevels.includes("medium")) rawLevels.push("medium");
+      if (!rawLevels.includes("high")) rawLevels.push("high");
+    }
+
+    if (rawLevels.length === 0) {
+      rawLevels = ["low", "medium", "high"];
+    }
+
+    return rawLevels as LlmThinkingLevel[];
+  }
+
+  resolveEffectiveReasoning(
+    model: Model<any>,
+    requested?: LlmThinkingLevel,
+    defaultLevel?: LlmThinkingLevel
+  ): LlmThinkingLevel | undefined {
+    if (!model.reasoning) {
+      return undefined;
+    }
+
+    const supported = this.getModelSupportedThinkingLevels(model);
+    const candidate = requested || defaultLevel || "off";
+
+    if (candidate === "off") {
+      if (supported.includes("off")) {
+        return "off";
+      }
+      return supported[0] || "low";
+    }
+
+    if (supported.includes(candidate)) {
+      return candidate;
+    }
+
+    try {
+      const clamped = clampThinkingLevel(model, candidate as ModelThinkingLevel);
+      if (supported.includes(clamped as LlmThinkingLevel)) {
+        return clamped as LlmThinkingLevel;
+      }
+    } catch {}
+
+    return supported[0] || "low";
+  }
+
   async listModels(filter?: { provider?: string; search?: string; limit?: number }): Promise<LlmModelCatalogItem[]> {
     const settings = await this.getSettings();
     const map = new Map<string, LlmModelCatalogItem>();
@@ -228,6 +295,7 @@ export class LlmService {
         contextWindow: m.contextWindow,
         maxTokens: m.maxTokens,
         reasoning: Boolean(m.reasoning),
+        supportedThinkingLevels: this.getModelSupportedThinkingLevels(m),
         cost: m.cost
           ? {
               input: m.cost.input,
@@ -246,6 +314,7 @@ export class LlmService {
       for (const [modelId, def] of Object.entries(modelsObj)) {
         const key = `${providerId}:${modelId}`;
         if (!map.has(key)) {
+          const reasoning = Boolean(def.reasoning || def.thinking);
           map.set(key, {
             id: modelId,
             name: def.name || modelId,
@@ -254,7 +323,8 @@ export class LlmService {
             baseUrl: def.baseUrl,
             contextWindow: def.contextWindow,
             maxTokens: def.maxTokens,
-            reasoning: Boolean(def.reasoning || def.thinking),
+            reasoning,
+            supportedThinkingLevels: reasoning ? ["low", "medium", "high"] : ["off"],
             cost: def.cost,
             source: "builtin"
           });
@@ -265,7 +335,10 @@ export class LlmService {
     // 3. Web catalog entries
     for (const [key, item] of this.webCatalog) {
       if (!map.has(key)) {
-        map.set(key, item);
+        map.set(key, {
+          ...item,
+          supportedThinkingLevels: item.reasoning ? ["low", "medium", "high"] : ["off"]
+        });
       }
     }
 
@@ -280,6 +353,7 @@ export class LlmService {
         contextWindow: custom.contextWindow,
         maxTokens: custom.maxTokens,
         reasoning: custom.reasoning,
+        supportedThinkingLevels: custom.reasoning ? ["low", "medium", "high"] : ["off"],
         source: "custom"
       });
     }
@@ -527,6 +601,15 @@ export class LlmService {
       apiKey
     };
 
+    const effectiveReasoning = this.resolveEffectiveReasoning(
+      model,
+      options.thinkingLevel,
+      settings.defaultThinkingLevel
+    );
+    if (effectiveReasoning) {
+      streamOptions.reasoning = effectiveReasoning;
+    }
+
     if (options.temperature !== undefined) {
       streamOptions.temperature = options.temperature;
     }
@@ -542,7 +625,8 @@ export class LlmService {
     logger.info("Executing LLM generation", {
       provider,
       model: modelId,
-      baseUrl: model.baseUrl
+      baseUrl: model.baseUrl,
+      reasoning: effectiveReasoning
     });
 
     let assistantMessage: AssistantMessage;
@@ -612,6 +696,15 @@ export class LlmService {
     const streamOptions: Record<string, any> = {
       apiKey
     };
+
+    const effectiveReasoning = this.resolveEffectiveReasoning(
+      model,
+      options.thinkingLevel,
+      settings.defaultThinkingLevel
+    );
+    if (effectiveReasoning) {
+      streamOptions.reasoning = effectiveReasoning;
+    }
 
     if (options.temperature !== undefined) {
       streamOptions.temperature = options.temperature;

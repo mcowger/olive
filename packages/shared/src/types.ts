@@ -239,6 +239,8 @@ export interface LlmProviderConfig {
   headers?: Record<string, string>;
 }
 
+export type LlmThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface LlmCustomModel {
   id: string;
   name: string;
@@ -253,6 +255,7 @@ export interface LlmCustomModel {
 export interface LlmSettings {
   defaultProvider: string;
   defaultModel: string;
+  defaultThinkingLevel?: LlmThinkingLevel;
   providers: Record<string, LlmProviderConfig>;
   customModels: LlmCustomModel[];
 }
@@ -266,6 +269,7 @@ export interface LlmModelCatalogItem {
   contextWindow?: number;
   maxTokens?: number;
   reasoning?: boolean;
+  supportedThinkingLevels?: LlmThinkingLevel[];
   cost?: {
     input: number;
     output: number;
@@ -290,6 +294,7 @@ export interface LlmGenerateOptions {
   prompt: string;
   temperature?: number;
   maxTokens?: number;
+  thinkingLevel?: LlmThinkingLevel;
   apiKeyOverride?: string;
   baseUrlOverride?: string;
 }

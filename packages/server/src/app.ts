@@ -329,6 +329,7 @@ export function createApp(options: AppOptions = {}): Hono {
       templateId?: string;
       provider?: string;
       model?: string;
+      thinkingLevel?: string;
       setPrimary?: boolean;
     } = {};
     try {
@@ -341,6 +342,7 @@ export function createApp(options: AppOptions = {}): Hono {
         templateId: body.templateId,
         provider: body.provider,
         model: body.model,
+        thinkingLevel: body.thinkingLevel as any,
         setPrimary: body.setPrimary
       });
 
@@ -682,6 +684,7 @@ export function createApp(options: AppOptions = {}): Hono {
     return c.json({
       defaultProvider: settings.defaultProvider,
       defaultModel: settings.defaultModel,
+      defaultThinkingLevel: settings.defaultThinkingLevel || "off",
       providers: sanitizedProviders,
       customModels: settings.customModels
     });
@@ -720,7 +723,7 @@ export function createApp(options: AppOptions = {}): Hono {
   });
 
   app.post("/api/llm/test", async (c) => {
-    let body: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } = {};
+    let body: { provider?: string; model?: string; apiKey?: string; baseUrl?: string; thinkingLevel?: string } = {};
     try {
       body = await c.req.json();
     } catch {}
@@ -732,6 +735,7 @@ export function createApp(options: AppOptions = {}): Hono {
         prompt: "Reply with strictly the word: PONG",
         apiKeyOverride: body.apiKey,
         baseUrlOverride: body.baseUrl,
+        thinkingLevel: body.thinkingLevel as any,
         maxTokens: 50
       });
 

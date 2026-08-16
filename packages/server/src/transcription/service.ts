@@ -17,6 +17,8 @@ import {
   type DiscoveredSpeakerVoiceprint
 } from "../providers/local/index.ts";
 
+import type { SummaryService } from "../summaries/service.ts";
+
 export const STAGE_SPEECHMATICS_TRANSCRIBE = "speechmatics_transcribe";
 export const STAGE_LOCAL_TRANSCRIBE = "local_transcribe";
 export const PROVIDER_SPEECHMATICS = "speechmatics";
@@ -34,6 +36,7 @@ export interface TranscriptionServiceOptions {
   webhookUrl?: string;
   webhookSecret?: string;
   now?: () => number;
+  summaryService?: SummaryService;
 }
 
 export interface TranscribeMeetingOptions {
@@ -74,6 +77,7 @@ export class TranscriptionService {
   private readonly webhookUrl?: string;
   private readonly webhookSecret?: string;
   private readonly now: () => number;
+  private summaryService?: SummaryService;
 
   constructor(options: TranscriptionServiceOptions) {
     this.db = options.db;
@@ -85,6 +89,32 @@ export class TranscriptionService {
     this.webhookUrl = options.webhookUrl;
     this.webhookSecret = options.webhookSecret;
     this.now = options.now ?? Date.now;
+    this.summaryService = options.summaryService;
+  }
+
+  setSummaryService(service: SummaryService): void {
+    this.summaryService = service;
+  }
+
+  private async autoSummarize(meetingId: string): Promise<void> {
+    if (!this.summaryService) return;
+    try {
+      const meeting = await this.db
+        .selectFrom("meetings")
+        .select(["id", "primary_summary_artifact_id"])
+        .where("id", "=", meetingId)
+        .executeTakeFirst();
+
+      if (meeting && !meeting.primary_summary_artifact_id) {
+        await this.summaryService.generateSummary({ meetingId, setPrimary: true });
+        this.logger.info("Auto-generated summary on transcript completion", { meetingId });
+      }
+    } catch (err) {
+      this.logger.warn("Auto-summarization skipped or failed on transcript completion", {
+        meetingId,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
   }
 
   get speechmatics(): SpeechmaticsClient {
@@ -278,6 +308,9 @@ export class TranscriptionService {
         })
         .where("id", "=", stageRunId)
         .execute();
+
+      // Trigger auto-summarization hook
+      void this.autoSummarize(meeting.id);
 
       return {
         stageRunId,
@@ -635,6 +668,9 @@ export class TranscriptionService {
       })
       .where("id", "=", stageRunId)
       .execute();
+
+    // Trigger auto-summarization hook
+    void this.autoSummarize(meeting.id);
 
     // Delete job from Speechmatics for 7-day retention cleanup hygiene
     try {

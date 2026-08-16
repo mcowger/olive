@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
@@ -113,23 +114,72 @@ function toSpeaker(row: SpeakerRow): Speaker {
 
 export async function listMeetings(
   db: Kysely<Database>,
-  query: Partial<MeetingListQuery> = {}
+  query: Partial<MeetingListQuery> = {},
+  meetingsDir?: string
 ): Promise<MeetingListResponse> {
   const limit = Math.min(Math.max(Math.trunc(query.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
   const offset = Math.max(Math.trunc(query.offset ?? 0), 0);
   const search = query.search?.trim();
-  const applyFilters = <T extends { where: (...args: any[]) => T }>(builder: T): T => {
-    if (!search) {
-      return builder;
+
+  let matchingIds: Set<string> | null = null;
+
+  if (search) {
+    matchingIds = new Set<string>();
+    const pattern = `%${search}%`;
+
+    // 1. Direct title and tags match
+    const titleTagMatches = await db
+      .selectFrom("meetings")
+      .select("id")
+      .where((eb) => eb.or([eb("title", "like", pattern), eb("tags", "like", pattern)]))
+      .execute();
+
+    for (const m of titleTagMatches) {
+      matchingIds.add(m.id);
     }
 
-    const pattern = `%${search}%`;
-    return builder.where((expressionBuilder: any) =>
-      expressionBuilder.or([
-        expressionBuilder("title", "like", pattern),
-        expressionBuilder("tags", "like", pattern)
-      ])
-    );
+    // 2. Full-text search in transcript and summary artifacts
+    if (meetingsDir) {
+      const contentArtifacts = await db
+        .selectFrom("artifacts")
+        .innerJoin("meetings", "meetings.id", "artifacts.meeting_id")
+        .select([
+          "artifacts.meeting_id",
+          "artifacts.path",
+          "meetings.start_time",
+          "meetings.title",
+          "meetings.id as m_id"
+        ])
+        .where("artifacts.kind", "in", ["transcript", "summary"])
+        .execute();
+
+      const searchLower = search.toLowerCase();
+      for (const a of contentArtifacts) {
+        if (matchingIds.has(a.meeting_id)) continue;
+        try {
+          const folder = meetingPaths(meetingsDir, a.start_time, a.title, a.m_id).folder;
+          const fullPath = join(folder, a.path);
+          if (existsSync(fullPath)) {
+            const text = await readFile(fullPath, "utf8");
+            if (text.toLowerCase().includes(searchLower)) {
+              matchingIds.add(a.meeting_id);
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  const applyFilters = <T extends { where: (...args: any[]) => T }>(builder: T): T => {
+    if (!matchingIds) {
+      return builder;
+    }
+    if (matchingIds.size === 0) {
+      return builder.where("id", "=", "__no_match__");
+    }
+    return builder.where("id", "in", Array.from(matchingIds));
   };
 
   const rowsQuery = applyFilters(db.selectFrom("meetings"));

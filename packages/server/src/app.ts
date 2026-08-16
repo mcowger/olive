@@ -126,6 +126,8 @@ export function createApp(options: AppOptions = {}): Hono {
       templateService
     });
 
+  transcriptionService.setSummaryService(summaryService);
+
   const plaudPoller =
     options.plaudPoller ??
     new PlaudPoller({
@@ -140,11 +142,15 @@ export function createApp(options: AppOptions = {}): Hono {
   app.get("/api/health", (c) => c.json({ status: "ok" }));
 
   app.get("/api/meetings", async (c) => {
-    const response = await listMeetings(db, {
-      limit: numericQueryParam(c.req.query("limit")),
-      offset: numericQueryParam(c.req.query("offset")),
-      search: c.req.query("search")
-    });
+    const response = await listMeetings(
+      db,
+      {
+        limit: numericQueryParam(c.req.query("limit")),
+        offset: numericQueryParam(c.req.query("offset")),
+        search: c.req.query("search")
+      },
+      meetingsDir
+    );
 
     return c.json(response);
   });

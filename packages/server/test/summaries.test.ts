@@ -218,4 +218,23 @@ describe("Summaries API", () => {
     );
     expect(deleteRes.status).toBe(200);
   });
+
+  test("full-text search finds meetings by transcript content and summary content", async () => {
+    const { db, meetingsDir, summaryService, llmService, templateService } = createTestContext();
+    const { meetingId } = await seedMeetingWithTranscript(db, meetingsDir);
+    const app = createApp({ db, meetingsDir, summaryService, llmService, templateService });
+
+    // Search by word in transcript ("authentication")
+    const transcriptSearch = await app.request("http://localhost/api/meetings?search=authentication");
+    expect(transcriptSearch.status).toBe(200);
+    const tBody = (await transcriptSearch.json()) as any;
+    expect(tBody.meetings.length).toBe(1);
+    expect(tBody.meetings[0].id).toBe(meetingId);
+
+    // Search by nonexistent word
+    const noSearch = await app.request("http://localhost/api/meetings?search=nonexistentterm12345");
+    expect(noSearch.status).toBe(200);
+    const nBody = (await noSearch.json()) as any;
+    expect(nBody.meetings.length).toBe(0);
+  });
 });

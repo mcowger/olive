@@ -85,6 +85,17 @@ describe("HTTP API", () => {
       }
     });
 
+    // Test full-text search with keyword matching
+    const searchMatch = await app.request("http://olive.test/api/meetings?search=fixture");
+    expect(searchMatch.status).toBe(200);
+    const searchBody = (await searchMatch.json()) as any;
+    expect(searchBody.meetings.length).toBe(1);
+
+    const searchNoMatch = await app.request("http://olive.test/api/meetings?search=nonexistenttermxyz");
+    expect(searchNoMatch.status).toBe(200);
+    const noMatchBody = (await searchNoMatch.json()) as any;
+    expect(noMatchBody.meetings.length).toBe(0);
+
     await handle.db.destroy();
     handle.sqlite.close();
   });

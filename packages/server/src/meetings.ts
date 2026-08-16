@@ -5,8 +5,10 @@ import type {
   Artifact,
   ArtifactRow,
   Database,
+  MeetingDetailAggregate,
   MeetingListItem,
   MeetingRow,
+  MeetingSummaryItem,
   Recording,
   RecordingRow,
   Speaker,
@@ -33,15 +35,7 @@ export interface MeetingListResponse {
   };
 }
 
-export interface MeetingDetailResponse {
-  meeting: MeetingListItem;
-  recordings: Recording[];
-  artifacts: Artifact[];
-  speakers: Speaker[];
-  stageRuns: StageRunRow[];
-  transcriptContent?: string | null;
-  summaryContent?: string | null;
-}
+export type MeetingDetailResponse = MeetingDetailAggregate;
 
 function parseTags(value: string): string[] {
   try {
@@ -185,6 +179,7 @@ export async function getMeeting(
 
   let transcriptContent: string | null = null;
   let summaryContent: string | null = null;
+  const summaries: MeetingSummaryItem[] = [];
 
   if (meetingsDir) {
     const folder = meetingPaths(meetingsDir, meetingRow.start_time, meetingRow.title, meetingRow.id).folder;
@@ -206,7 +201,29 @@ export async function getMeeting(
         // file unreadable or not on disk yet
       }
     }
+
+    // Load all summary artifacts
+    const summaryArtifacts = artifactRows.filter((a) => a.kind === "summary");
+    for (const sa of summaryArtifacts) {
+      try {
+        const content = await readFile(join(folder, sa.path), "utf8");
+        summaries.push({
+          id: sa.id,
+          provider: sa.provider,
+          format: sa.format,
+          path: sa.path,
+          createdAt: sa.created_at,
+          content,
+          isPrimary: sa.id === meetingRow.primary_summary_artifact_id
+        });
+      } catch {
+        // file not yet on disk
+      }
+    }
   }
+
+  // Sort summaries newest first
+  summaries.sort((a, b) => b.createdAt - a.createdAt);
 
   return {
     meeting: toMeeting(meetingRow),
@@ -215,6 +232,7 @@ export async function getMeeting(
     speakers: speakerRows.map((s) => toSpeaker(s)),
     stageRuns,
     transcriptContent,
-    summaryContent
+    summaryContent,
+    summaries
   };
 }

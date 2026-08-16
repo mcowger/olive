@@ -86,6 +86,18 @@ export interface SyncStateTable {
   value: string;
 }
 
+export interface TemplateTable {
+  id: string;
+  name: string;
+  description: string | null;
+  system_prompt: string;
+  user_prompt: string;
+  is_default: Generated<number>;
+  is_builtin: Generated<number>;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface Database {
   meetings: MeetingTable;
   recordings: RecordingTable;
@@ -95,6 +107,7 @@ export interface Database {
   stage_runs: StageRunTable;
   plaud_ingest_state: PlaudIngestStateTable;
   sync_state: SyncStateTable;
+  templates: TemplateTable;
 }
 
 export type MeetingRow = Selectable<MeetingTable>;
@@ -114,6 +127,21 @@ export type PlaudIngestStateRow = Selectable<PlaudIngestStateTable>;
 export type NewPlaudIngestState = Insertable<PlaudIngestStateTable>;
 export type SyncStateRow = Selectable<SyncStateTable>;
 export type NewSyncState = Insertable<SyncStateTable>;
+export type TemplateRow = Selectable<TemplateTable>;
+export type NewTemplate = Insertable<TemplateTable>;
+export type TemplateUpdate = Updateable<TemplateTable>;
+
+export interface Template {
+  id: string;
+  name: string;
+  description: string | null;
+  systemPrompt: string;
+  userPrompt: string;
+  isDefault: boolean;
+  isBuiltin: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface Meeting {
   id: string;
@@ -204,3 +232,98 @@ export interface TranscriptionProviderCaps {
 }
 
 export type MeetingListItem = Meeting;
+
+export interface LlmProviderConfig {
+  apiKey?: string;
+  baseUrl?: string;
+  headers?: Record<string, string>;
+}
+
+export interface LlmCustomModel {
+  id: string;
+  name: string;
+  provider: string;
+  api?: string;
+  baseUrl?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+}
+
+export interface LlmSettings {
+  defaultProvider: string;
+  defaultModel: string;
+  providers: Record<string, LlmProviderConfig>;
+  customModels: LlmCustomModel[];
+}
+
+export interface LlmModelCatalogItem {
+  id: string;
+  name: string;
+  provider: string;
+  api: string;
+  baseUrl?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  cost?: {
+    input: number;
+    output: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+  source: "builtin" | "web" | "custom";
+}
+
+export interface LlmProviderSummary {
+  id: string;
+  name: string;
+  isConfigured: boolean;
+  hasCustomBaseUrl: boolean;
+  modelCount: number;
+}
+
+export interface LlmGenerateOptions {
+  provider?: string;
+  model?: string;
+  systemPrompt?: string;
+  prompt: string;
+  temperature?: number;
+  maxTokens?: number;
+  apiKeyOverride?: string;
+  baseUrlOverride?: string;
+}
+
+export interface LlmGenerateResult {
+  text: string;
+  provider: string;
+  model: string;
+  durationMs: number;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cost?: number;
+  };
+}
+
+export interface MeetingSummaryItem {
+  id: string;
+  provider: string;
+  format: ArtifactFormat;
+  path: string;
+  createdAt: number;
+  content: string;
+  isPrimary: boolean;
+}
+
+export interface MeetingDetailAggregate {
+  meeting: MeetingListItem;
+  recordings: Recording[];
+  artifacts: Artifact[];
+  speakers: Speaker[];
+  stageRuns: StageRunRow[];
+  transcriptContent?: string | null;
+  summaryContent?: string | null;
+  summaries: MeetingSummaryItem[];
+}

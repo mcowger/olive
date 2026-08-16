@@ -74,6 +74,17 @@ const CREATE_TABLE_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    system_prompt TEXT NOT NULL DEFAULT '',
+    user_prompt TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
   )`
 ];
 
@@ -82,7 +93,8 @@ const CREATE_INDEX_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_recordings_meeting ON recordings(meeting_id)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_recordings_provider_id ON recordings(provider, provider_recording_id) WHERE provider_recording_id IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS idx_artifacts_meeting ON artifacts(meeting_id)",
-  "CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_runs_meeting_stage ON stage_runs(meeting_id, stage)"
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_runs_meeting_stage ON stage_runs(meeting_id, stage)",
+  "CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name)"
 ];
 
 const ADDITIVE_COLUMNS = [
@@ -110,6 +122,136 @@ function addColumnIfMissing(db: BunDatabase, table: string, column: string, defi
   }
 }
 
+export const DEFAULT_TEMPLATES = [
+  {
+    id: "00000000-0000-0000-0000-000000000001",
+    name: "Executive Summary",
+    description: "Structured meeting overview with context, key discussion points, decisions made, and assigned action items.",
+    system_prompt: "You are an expert executive assistant and meeting analyst. Produce clear, structured, professional meeting summaries in Markdown format with precise speaker attribution and actionable next steps.",
+    user_prompt: `# Meeting Summary: {{title}}
+**Date:** {{date}}
+**Participants:** {{speakers}}
+
+## Executive Overview
+Summarize the main purpose, high-level context, and outcome of the meeting in 2-3 concise paragraphs.
+
+## Key Discussion Points
+- Detail each key topic discussed, noting differing perspectives, relevant metrics, and context.
+
+## Decisions Made
+- Clear, bulleted list of all explicit decisions agreed upon during the conversation.
+
+## Action Items & Next Steps
+- [ ] **[Owner]**: Specific task description (include deadlines/timeline if mentioned)
+
+---
+### Meeting Transcript:
+{{transcript}}`,
+    is_default: 1,
+    is_builtin: 1
+  },
+  {
+    id: "00000000-0000-0000-0000-000000000002",
+    name: "1-on-1 Catchup",
+    description: "Focused on individual priorities, project updates, blockers, feedback, and mutual commitments.",
+    system_prompt: "You are an executive coach and engineering manager summarizing a 1-on-1 meeting. Emphasize personal updates, blockers, feedback, and commitments.",
+    user_prompt: `# 1-on-1 Summary: {{title}}
+**Date:** {{date}}
+**Participants:** {{speakers}}
+
+## Progress & Wins
+- Recent achievements, project updates, and positive milestones discussed.
+
+## Blockers & Concerns
+- Any obstacles, risks, team dependencies, or challenges raised that need resolution.
+
+## Feedback & Career Growth
+- Feedback exchanged, development opportunities, coaching notes, or long-term goals.
+
+## Commitments & Follow-ups
+- [ ] **[Owner]**: Agreed action item or follow-up
+
+---
+### Meeting Transcript:
+{{transcript}}`,
+    is_default: 0,
+    is_builtin: 1
+  },
+  {
+    id: "00000000-0000-0000-0000-000000000003",
+    name: "Technical Architecture & Design Review",
+    description: "Detailed engineering review covering architecture, technical trade-offs, scalability, and open questions.",
+    system_prompt: "You are a principal software engineer and technical architect reviewing meeting notes. Focus on architectural decisions, trade-offs, constraints, and engineering action items.",
+    user_prompt: `# Technical Architecture Review: {{title}}
+**Date:** {{date}}
+**Participants:** {{speakers}}
+
+## Problem Statement & Context
+- Technical goals, motivation, and scope of the proposed system or change.
+
+## Architecture & Design Decisions
+- Architectural approach, component responsibilities, data flow, and key decisions.
+
+## Trade-offs & Alternatives Considered
+- Alternatives discussed, pros/cons, and explicit trade-offs.
+
+## Non-Functional Requirements & Risks
+- Security, performance, scale, reliability, failure modes, and monitoring needs.
+
+## Open Questions & Action Items
+- [ ] **[Owner]**: Follow-up task, benchmark, prototype, or design doc update
+
+---
+### Meeting Transcript:
+{{transcript}}`,
+    is_default: 0,
+    is_builtin: 1
+  },
+  {
+    id: "00000000-0000-0000-0000-000000000004",
+    name: "Action Items & Decisions",
+    description: "Concise, zero-fluff extraction of decisions made and task assignments with owners.",
+    system_prompt: "You are an agile project manager extracting strictly decisions and actionable next steps. Omit general conversational filler.",
+    user_prompt: `# Decisions & Action Items: {{title}}
+**Date:** {{date}}
+**Participants:** {{speakers}}
+
+## Decisions Log
+- **Decision**: Context and agreed outcome.
+
+## Action Items Matrix
+- [ ] **[Owner]**: Task description (Due date / milestone if mentioned)
+
+---
+### Meeting Transcript:
+{{transcript}}`,
+    is_default: 0,
+    is_builtin: 1
+  }
+];
+
+function seedBuiltinTemplates(db: BunDatabase): void {
+  const now = Date.now();
+  const insertStmt = db.prepare(`
+    INSERT OR IGNORE INTO templates (id, name, description, system_prompt, user_prompt, is_default, is_builtin, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  for (const tpl of DEFAULT_TEMPLATES) {
+    insertStmt.run(
+      tpl.id,
+      tpl.name,
+      tpl.description,
+      tpl.system_prompt,
+      tpl.user_prompt,
+      tpl.is_default,
+      tpl.is_builtin,
+      now,
+      now
+    );
+  }
+}
+
 export function runMigrations(db: BunDatabase): void {
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA journal_mode = WAL");
@@ -125,4 +267,6 @@ export function runMigrations(db: BunDatabase): void {
   for (const statement of CREATE_INDEX_STATEMENTS) {
     db.run(statement);
   }
+
+  seedBuiltinTemplates(db);
 }

@@ -169,6 +169,10 @@ describe("domain migrations", () => {
       value: String(now)
     });
 
+    const templates = await db.selectFrom("templates").selectAll().execute();
+    expect(templates.length).toBeGreaterThanOrEqual(4);
+    expect(templates.find((t) => t.is_default === 1)?.name).toBe("Executive Summary");
+
     await db.destroy();
     sqlite.close();
   });

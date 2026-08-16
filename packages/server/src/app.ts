@@ -12,6 +12,11 @@ import { PlaudPoller, type PlaudClientLike, type PlaudOAuthManager } from "./pla
 import { SpeechmaticsClient, type SpeechmaticsJsonV2 } from "./providers/speechmatics/index.ts";
 import { TranscriptionService } from "./transcription/service.ts";
 import { SpeakerService } from "./speakers/service.ts";
+import { IngestService } from "./ingest/service.ts";
+import { TemplateService } from "./templates/service.ts";
+import { LlmService } from "./llm/service.ts";
+import { SummaryService } from "./summaries/service.ts";
+import { meetingPaths } from "./layout.ts";
 
 export interface AppOptions {
   db?: Kysely<Database>;
@@ -27,7 +32,12 @@ export interface AppOptions {
   speechmaticsClient?: SpeechmaticsClient;
   transcriptionService?: TranscriptionService;
   speakerService?: SpeakerService;
+  ingestService?: IngestService;
+  templateService?: TemplateService;
+  llmService?: LlmService;
+  summaryService?: SummaryService;
   speechmaticsWebhookSecret?: string;
+  ingestToken?: string;
 }
 
 function numericQueryParam(value: string | undefined): number | undefined {
@@ -86,6 +96,36 @@ export function createApp(options: AppOptions = {}): Hono {
       speechmaticsClient
     });
 
+  const ingestToken = options.ingestToken || process.env.OLIVE_INGEST_TOKEN;
+
+  const ingestService =
+    options.ingestService ??
+    new IngestService({
+      db,
+      meetingsDir,
+      transcriptionService
+    });
+
+  const templateService =
+    options.templateService ??
+    new TemplateService(db);
+
+  const llmService =
+    options.llmService ??
+    new LlmService({
+      db,
+      configDir
+    });
+
+  const summaryService =
+    options.summaryService ??
+    new SummaryService({
+      db,
+      meetingsDir,
+      llmService,
+      templateService
+    });
+
   const plaudPoller =
     options.plaudPoller ??
     new PlaudPoller({
@@ -109,6 +149,65 @@ export function createApp(options: AppOptions = {}): Hono {
     return c.json(response);
   });
 
+  app.post("/api/ingest", async (c) => {
+    if (ingestToken) {
+      const authHeader = c.req.header("authorization") || "";
+      const expected = `Bearer ${ingestToken}`;
+      if (authHeader !== expected) {
+        return c.json({ error: "Unauthorized: invalid or missing ingest token" }, 401);
+      }
+    }
+
+    let formData: FormData;
+    try {
+      formData = await c.req.formData();
+    } catch {
+      return c.json({ error: "Multipart form data required" }, 400);
+    }
+
+    const file = formData.get("file");
+    if (!file || !(file instanceof Blob)) {
+      return c.json({ error: "file field (audio blob) is required" }, 400);
+    }
+
+    const title = formData.get("title");
+    const sourceParam = formData.get("source");
+    const autoTranscribeParam = formData.get("autoTranscribe");
+    const providerParam = formData.get("provider");
+
+    const userAgent = c.req.header("user-agent") || "";
+    const isShortcut = userAgent.includes("Shortcuts") || sourceParam === "ios-shortcut";
+    const source = isShortcut
+      ? "ios-shortcut"
+      : typeof sourceParam === "string" && sourceParam === "plaud"
+      ? "plaud"
+      : "upload";
+
+    const audioBytes = new Uint8Array(await file.arrayBuffer());
+    const filename = file instanceof File ? file.name : "audio.m4a";
+    const mime = file.type || "audio/mp4";
+
+    const autoTranscribe =
+      autoTranscribeParam === "true" || autoTranscribeParam === "1";
+    const transcriptionProvider = providerParam === "local" ? "local" : "speechmatics";
+
+    try {
+      const result = await ingestService.ingestAudio({
+        audioBytes,
+        filename,
+        mime,
+        title: typeof title === "string" ? title : undefined,
+        source,
+        autoTranscribe,
+        transcriptionProvider
+      });
+
+      return c.json(result, result.deduped ? 200 : 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   app.get("/api/meetings/:id", async (c) => {
     const meetingId = c.req.param("id");
     const detail = await getMeeting(db, meetingId, meetingsDir);
@@ -116,6 +215,72 @@ export function createApp(options: AppOptions = {}): Hono {
       return c.json({ error: "Meeting not found" }, 404);
     }
     return c.json(detail);
+  });
+
+  app.get("/api/meetings/:id/audio", async (c) => {
+    const meetingId = c.req.param("id");
+    const meeting = await db
+      .selectFrom("meetings")
+      .selectAll()
+      .where("id", "=", meetingId)
+      .executeTakeFirst();
+
+    if (!meeting) {
+      return c.json({ error: "Meeting not found" }, 404);
+    }
+
+    const recording = await db
+      .selectFrom("recordings")
+      .selectAll()
+      .where("meeting_id", "=", meetingId)
+      .orderBy("created_at", "asc")
+      .executeTakeFirst();
+
+    if (!recording) {
+      return c.json({ error: "Recording not found" }, 404);
+    }
+
+    const folder = meetingPaths(meetingsDir, meeting.start_time, meeting.title, meeting.id).folder;
+    const fullPath = join(folder, recording.path);
+
+    if (!existsSync(fullPath)) {
+      return c.json({ error: "Audio file not found on disk" }, 404);
+    }
+
+    const file = Bun.file(fullPath);
+    const size = file.size;
+    const mime = recording.mime || "audio/mp4";
+
+    const rangeHeader = c.req.header("range");
+    if (rangeHeader && rangeHeader.startsWith("bytes=")) {
+      const parts = rangeHeader.replace("bytes=", "").split("-");
+      const start = Number(parts[0]);
+      const end = parts[1] ? Number(parts[1]) : size - 1;
+
+      if (!Number.isNaN(start) && start >= 0 && start <= end && end < size) {
+        const chunkSize = end - start + 1;
+        const sliced = file.slice(start, end + 1);
+
+        return new Response(sliced, {
+          status: 206,
+          headers: {
+            "Content-Range": `bytes ${start}-${end}/${size}`,
+            "Accept-Ranges": "bytes",
+            "Content-Length": String(chunkSize),
+            "Content-Type": mime
+          }
+        });
+      }
+    }
+
+    return new Response(file, {
+      status: 200,
+      headers: {
+        "Content-Length": String(size),
+        "Content-Type": mime,
+        "Accept-Ranges": "bytes"
+      }
+    });
   });
 
   app.post("/api/meetings/:id/transcribe", async (c) => {
@@ -147,6 +312,57 @@ export function createApp(options: AppOptions = {}): Hono {
       });
 
       return c.json(result, result.status === "error" ? 502 : 200);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/summarize", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: {
+      templateId?: string;
+      provider?: string;
+      model?: string;
+      setPrimary?: boolean;
+    } = {};
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {}
+
+    try {
+      const result = await summaryService.generateSummary({
+        meetingId,
+        templateId: body.templateId,
+        provider: body.provider,
+        model: body.model,
+        setPrimary: body.setPrimary
+      });
+
+      return c.json(result, 201);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.delete("/api/meetings/:id/summaries/:artifactId", async (c) => {
+    const meetingId = c.req.param("id");
+    const artifactId = c.req.param("artifactId");
+
+    try {
+      await summaryService.deleteSummary(meetingId, artifactId);
+      return c.json({ status: "deleted" });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/summaries/:artifactId/primary", async (c) => {
+    const meetingId = c.req.param("id");
+    const artifactId = c.req.param("artifactId");
+
+    try {
+      await summaryService.setPrimarySummary(meetingId, artifactId);
+      return c.json({ status: "updated", primarySummaryArtifactId: artifactId });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
@@ -346,6 +562,185 @@ export function createApp(options: AppOptions = {}): Hono {
     const id = c.req.param("id");
     await speakerService.deleteSpeaker(id);
     return c.json({ status: "deleted" });
+  });
+
+  // Templates API
+  app.get("/api/templates", async (c) => {
+    const templates = await templateService.listTemplates();
+    return c.json({ templates });
+  });
+
+  app.get("/api/templates/:id", async (c) => {
+    const id = c.req.param("id");
+    const template = await templateService.getTemplate(id);
+    if (!template) {
+      return c.json({ error: "Template not found" }, 404);
+    }
+    return c.json({ template });
+  });
+
+  app.post("/api/templates", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    try {
+      const template = await templateService.createTemplate(body as any);
+      return c.json({ template }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  const handleUpdateTemplate = async (c: any) => {
+    const id = c.req.param("id");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    try {
+      const template = await templateService.updateTemplate(id, body as any);
+      return c.json({ template });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes("not found") ? 404 : 400;
+      return c.json({ error: message }, status);
+    }
+  };
+
+  app.patch("/api/templates/:id", handleUpdateTemplate);
+  app.put("/api/templates/:id", handleUpdateTemplate);
+
+  app.delete("/api/templates/:id", async (c) => {
+    const id = c.req.param("id");
+    try {
+      await templateService.deleteTemplate(id);
+      return c.json({ status: "deleted" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes("not found") ? 404 : 400;
+      return c.json({ error: message }, status);
+    }
+  });
+
+  app.post("/api/templates/:id/default", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const template = await templateService.setDefaultTemplate(id);
+      return c.json({ template });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes("not found") ? 404 : 400;
+      return c.json({ error: message }, status);
+    }
+  });
+
+  // LLM API
+  app.get("/api/llm/providers", async (c) => {
+    const providers = await llmService.listProviders();
+    return c.json({ providers });
+  });
+
+  app.get("/api/llm/models", async (c) => {
+    const provider = c.req.query("provider");
+    const search = c.req.query("search");
+    const limit = numericQueryParam(c.req.query("limit"));
+
+    const models = await llmService.listModels({ provider, search, limit });
+    return c.json({ models });
+  });
+
+  app.post("/api/llm/refresh-catalog", async (c) => {
+    const result = await llmService.refreshCatalog();
+    return c.json({ status: "refreshed", ...result });
+  });
+
+  app.get("/api/llm/config", async (c) => {
+    const settings = await llmService.getSettings();
+    // Return sanitized settings (masking API keys for privacy in UI)
+    const sanitizedProviders: Record<string, { hasApiKey: boolean; baseUrl?: string; headers?: Record<string, string> }> = {};
+    for (const [pId, pCfg] of Object.entries(settings.providers)) {
+      sanitizedProviders[pId] = {
+        hasApiKey: Boolean(pCfg.apiKey),
+        baseUrl: pCfg.baseUrl,
+        headers: pCfg.headers
+      };
+    }
+
+    return c.json({
+      defaultProvider: settings.defaultProvider,
+      defaultModel: settings.defaultModel,
+      providers: sanitizedProviders,
+      customModels: settings.customModels
+    });
+  });
+
+  app.post("/api/llm/config", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    try {
+      const updated = await llmService.updateSettings(body as any);
+      return c.json({ status: "updated", settings: updated });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/llm/generate", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    try {
+      const result = await llmService.generateText(body as any);
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/llm/test", async (c) => {
+    let body: { provider?: string; model?: string; apiKey?: string; baseUrl?: string } = {};
+    try {
+      body = await c.req.json();
+    } catch {}
+
+    try {
+      const result = await llmService.generateText({
+        provider: body.provider,
+        model: body.model,
+        prompt: "Reply with strictly the word: PONG",
+        apiKeyOverride: body.apiKey,
+        baseUrlOverride: body.baseUrl,
+        maxTokens: 50
+      });
+
+      const text = result.text.trim();
+      return c.json({
+        ok: text.toLowerCase().includes("pong") || text.length > 0,
+        response: text,
+        provider: result.provider,
+        model: result.model,
+        durationMs: result.durationMs,
+        usage: result.usage
+      });
+    } catch (err) {
+      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400);
+    }
   });
 
   app.post("/api/meetings/:id/speakers/link", async (c) => {

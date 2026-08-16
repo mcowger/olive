@@ -116,3 +116,79 @@ export const enrolledSpeakerSchema = z.object({
   name: z.string(),
   providerIds: z.record(z.string(), z.array(z.string()))
 });
+
+export const templateSchema = z.object({
+  id: idSchema,
+  name: z.string().min(1),
+  description: z.string().nullable(),
+  systemPrompt: z.string(),
+  userPrompt: z.string().min(1),
+  isDefault: z.boolean(),
+  isBuiltin: z.boolean(),
+  createdAt: z.number().int(),
+  updatedAt: z.number().int()
+});
+
+export const createTemplateInputSchema = z.object({
+  name: z.string().trim().min(1, "Template name is required"),
+  description: z.string().trim().nullable().optional(),
+  systemPrompt: z.string().default(""),
+  userPrompt: z.string().trim().min(1, "User prompt template is required"),
+  isDefault: z.boolean().optional().default(false)
+});
+
+export const updateTemplateInputSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  description: z.string().trim().nullable().optional(),
+  systemPrompt: z.string().optional(),
+  userPrompt: z.string().trim().min(1).optional(),
+  isDefault: z.boolean().optional()
+});
+
+export type CreateTemplateInput = z.input<typeof createTemplateInputSchema>;
+export type UpdateTemplateInput = z.input<typeof updateTemplateInputSchema>;
+
+export const llmProviderConfigSchema = z.object({
+  apiKey: z.string().optional(),
+  baseUrl: z.string().url().or(z.string().min(1)).optional(),
+  headers: z.record(z.string(), z.string()).optional()
+});
+
+export const llmCustomModelSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  provider: z.string().min(1),
+  api: z.string().optional(),
+  baseUrl: z.string().optional(),
+  contextWindow: z.number().int().positive().optional(),
+  maxTokens: z.number().int().positive().optional(),
+  reasoning: z.boolean().optional()
+});
+
+export const llmSettingsSchema = z.object({
+  defaultProvider: z.string().default("google"),
+  defaultModel: z.string().default("gemini-2.5-flash"),
+  providers: z.record(z.string(), llmProviderConfigSchema).default({}),
+  customModels: z.array(llmCustomModelSchema).default([])
+});
+
+export const updateLlmSettingsInputSchema = z.object({
+  defaultProvider: z.string().optional(),
+  defaultModel: z.string().optional(),
+  providers: z.record(z.string(), llmProviderConfigSchema).optional(),
+  customModels: z.array(llmCustomModelSchema).optional()
+});
+
+export const llmGenerateInputSchema = z.object({
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  systemPrompt: z.string().optional(),
+  prompt: z.string().min(1, "Prompt is required"),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().positive().optional(),
+  apiKeyOverride: z.string().optional(),
+  baseUrlOverride: z.string().optional()
+});
+
+export type UpdateLlmSettingsInput = z.infer<typeof updateLlmSettingsInputSchema>;
+export type LlmGenerateInput = z.infer<typeof llmGenerateInputSchema>;

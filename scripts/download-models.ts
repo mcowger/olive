@@ -1,8 +1,13 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { pipeline, env } from "@huggingface/transformers";
 
-const cacheDir = process.env.TRANSFORMERS_CACHE || process.env.HF_HOME || "/app/.cache/huggingface";
+const defaultCacheDir = existsSync("/app")
+  ? "/app/.cache/huggingface"
+  : join(tmpdir(), "olive-models-cache");
+
+const cacheDir = process.env.TRANSFORMERS_CACHE || process.env.HF_HOME || defaultCacheDir;
 env.cacheDir = cacheDir || null;
 mkdirSync(cacheDir, { recursive: true });
 
@@ -22,7 +27,8 @@ try {
 }
 
 // 2. Fetch and cache web model catalog for offline availability
-const configDir = process.env.OLIVE_CONFIG_DIR || "/app/data/config";
+const defaultConfigDir = existsSync("/app") ? "/app/data/config" : join(tmpdir(), "olive-config");
+const configDir = process.env.OLIVE_CONFIG_DIR || defaultConfigDir;
 mkdirSync(configDir, { recursive: true });
 const webCatalogPath = join(configDir, "models-web-cache.json");
 

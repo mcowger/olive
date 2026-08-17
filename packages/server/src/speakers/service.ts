@@ -225,11 +225,11 @@ export class SpeakerService {
         }
       }
 
-      // 2. Cross-fill Speechmatics voiceprint from saved audio clips if missing and key is present
+      // 2. Cross-fill Speechmatics voiceprint from saved audio clips if missing and client is configured
       if (
         clips.length > 0 &&
         (!providerIds.speechmatics?.length || options.force) &&
-        process.env.SPEECHMATICS_API_KEY
+        (process.env.SPEECHMATICS_API_KEY || (this.client as any).jobs !== undefined)
       ) {
         const extractedSmIds: string[] = [];
         for (const relPath of clips) {
@@ -780,7 +780,7 @@ export class SpeakerService {
     }
 
     // 3. Submit enrollment job to Speechmatics (cross-filled if available)
-    if (providerMode === "speechmatics" || (providerMode === "both" && process.env.SPEECHMATICS_API_KEY)) {
+    if (providerMode === "speechmatics" || providerMode === "both") {
       try {
         const submitResult = await this.client.submitJob({
           audio: options.audioBytes,

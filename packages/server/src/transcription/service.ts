@@ -84,7 +84,9 @@ export class TranscriptionService {
     this.meetingsDir = options.meetingsDir;
     this.client = options.speechmaticsClient ?? new SpeechmaticsClient();
     this.localPipeline = options.localPipeline ?? new LocalTranscriptionPipeline();
-    this.defaultProvider = options.defaultProvider ?? (process.env.SPEECHMATICS_API_KEY ? "speechmatics" : "local");
+    this.defaultProvider =
+      options.defaultProvider ??
+      (options.speechmaticsClient || process.env.SPEECHMATICS_API_KEY ? "speechmatics" : "local");
     this.logger = options.logger ?? defaultLogger;
     this.webhookUrl = options.webhookUrl;
     this.webhookSecret = options.webhookSecret;

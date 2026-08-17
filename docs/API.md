@@ -288,3 +288,107 @@ Tests connectivity to an LLM provider and model by executing a quick ping prompt
   "model": "gemini-2.5-flash"
 }
 ```
+
+---
+
+## Backup & Restore API
+
+### `POST /api/backup`
+
+Creates a complete, self-contained backup archive (`.tar.gz`) containing:
+- Consistent SQLite database snapshot (`VACUUM INTO` + WAL checkpoint)
+- User settings (`settings.json`) and model cache (`models.json`)
+- All meeting folders with **all audio recordings**, transcripts, and summaries
+- Metadata manifest (`manifest.json`)
+
+Optional JSON payload:
+```json
+{
+  "filename": "my-custom-backup-name.tar.gz"
+}
+```
+
+Response (HTTP 201):
+```json
+{
+  "ok": true,
+  "backup": {
+    "filename": "olive-backup-20260817-003015.tar.gz",
+    "path": "/app/data/config/backups/olive-backup-20260817-003015.tar.gz",
+    "sizeBytes": 5839201,
+    "createdAt": "2026-08-17T00:30:15.000Z",
+    "manifest": {
+      "version": "1.0.0",
+      "createdAt": "2026-08-17T00:30:15.000Z",
+      "oliveVersion": "0.1.0",
+      "app": "olive",
+      "stats": {
+        "meetingCount": 14,
+        "recordingCount": 14,
+        "audioFilesCount": 14,
+        "totalAudioSizeBytes": 154829102,
+        "summaryCount": 28,
+        "speakerCount": 6,
+        "templateCount": 4
+      }
+    }
+  }
+}
+```
+
+### `GET /api/backup/list`
+
+Lists all stored backup archives on the server with metadata and manifest statistics.
+
+### `GET /api/backup/download/:filename`
+
+Streams the specified backup `.tar.gz` archive as an attachment download.
+
+### `GET /api/backup/export`
+
+Creates a fresh backup archive and immediately streams it as a browser download attachment (`Content-Disposition: attachment; filename="olive-backup-..."`).
+
+### `DELETE /api/backup/:filename`
+
+Deletes a stored backup archive from the server.
+
+### `POST /api/backup/restore`
+
+Restores the database, settings, and all audio files from a backup archive. Supports:
+1. **Multipart File Upload:** `multipart/form-data` with `file: <backup.tar.gz>`
+2. **Server-Stored File:** `application/json` with `{ "filename": "olive-backup-..." }`
+
+Response (HTTP 200):
+```json
+{
+  "ok": true,
+  "result": {
+    "success": true,
+    "restoredAt": "2026-08-17T00:35:00.000Z",
+    "manifest": { ... },
+    "stats": {
+      "meetings": 14,
+      "recordings": 14,
+      "audioFiles": 14,
+      "summaries": 28,
+      "speakers": 6,
+      "templates": 4
+    }
+  }
+}
+```
+
+---
+
+## Command Line Utilities
+
+### Create Backup
+```bash
+bun run scripts/backup.ts [optional-output-path.tar.gz]
+```
+
+### Restore Backup
+```bash
+bun run scripts/restore.ts <path-to-backup.tar.gz>
+```
+

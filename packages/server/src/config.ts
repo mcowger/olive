@@ -64,3 +64,8 @@ export function saveAppConfig(config: unknown, paths: OlivePaths = resolvePaths(
   cachedAppConfig = { settingsPath: paths.settingsPath, config: validated };
   return validated;
 }
+
+export function clearAppConfigCache(): void {
+  cachedAppConfig = undefined;
+}
+

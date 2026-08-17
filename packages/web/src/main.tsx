@@ -3,12 +3,14 @@ import { createRoot } from "react-dom/client";
 import type { ReactElement } from "react";
 import type {
   Artifact,
+  BackupInfo,
   LlmModelCatalogItem,
   LlmProviderSummary,
   MeetingDetailAggregate,
   MeetingListItem,
   MeetingSummaryItem,
   Recording,
+  RestoreResult,
   Speaker,
   StageRunRow,
   Template
@@ -61,7 +63,7 @@ function formatTimeOffset(ms: number): string {
 }
 
 export function App(): ReactElement {
-  const [activeTab, setActiveTab] = useState<"meetings" | "speakers" | "templates">("meetings");
+  const [activeTab, setActiveTab] = useState<"meetings" | "speakers" | "templates" | "backup">("meetings");
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
 
   // Global speakers cache
@@ -166,6 +168,18 @@ export function App(): ReactElement {
               >
                 Templates
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("backup");
+                  setSelectedMeetingId(null);
+                }}
+                className={`rounded-md px-3 py-1.5 transition ${
+                  activeTab === "backup" ? "bg-stone-900 text-lime-400 shadow" : "text-stone-400 hover:text-stone-200"
+                }`}
+              >
+                Backup & Restore
+              </button>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -215,8 +229,15 @@ export function App(): ReactElement {
               setSelectedMeetingId(id);
             }}
           />
-        ) : (
+        ) : activeTab === "templates" ? (
           <TemplatesListView />
+        ) : (
+          <BackupRestoreView
+            onRestoreComplete={() => {
+              void refreshSpeakers();
+              void refreshLlmConfig();
+            }}
+          />
         )}
       </main>
 
@@ -2640,8 +2661,410 @@ function LlmSettingsModal({
   );
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+}
+
+export function BackupRestoreView({ onRestoreComplete }: { onRestoreComplete: () => void }): ReactElement {
+  const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  const [confirmRestoreTarget, setConfirmRestoreTarget] = useState<{
+    type: "file" | "stored";
+    filename?: string;
+    stats?: { meetings: number; audioFiles: number; sizeBytes?: number };
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadBackups = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/backup/list");
+      if (res.ok) {
+        const data = await res.json();
+        setBackups(data.backups || []);
+      }
+    } catch {
+      setStatusMessage({ type: "error", text: "Failed to fetch backup list from server." });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadBackups();
+  }, []);
+
+  const handleCreateServerBackup = async () => {
+    setCreating(true);
+    setStatusMessage(null);
+    try {
+      const res = await fetch("/api/backup", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to create backup");
+      }
+      setStatusMessage({
+        type: "success",
+        text: `Backup created successfully (${formatBytes(data.backup.sizeBytes)}). Included ${data.backup.manifest.stats.meetingCount} meetings & ${data.backup.manifest.stats.audioFilesCount} audio files.`
+      });
+      await loadBackups();
+    } catch (err) {
+      setStatusMessage({ type: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDeleteBackup = async (filename: string) => {
+    if (!confirm(`Are you sure you want to delete backup archive "${filename}" from server?`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/backup/${encodeURIComponent(filename)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to delete backup");
+      }
+      setStatusMessage({ type: "success", text: `Deleted backup ${filename}` });
+      await loadBackups();
+    } catch (err) {
+      setStatusMessage({ type: "error", text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const handleExecuteRestore = async () => {
+    if (!confirmRestoreTarget) return;
+    setRestoring(true);
+    setStatusMessage(null);
+
+    try {
+      let res: Response;
+      if (confirmRestoreTarget.type === "file" && selectedFile) {
+        const formData = new FormData();
+        formData.append("file", selectedFile);
+        res = await fetch("/api/backup/restore", {
+          method: "POST",
+          body: formData
+        });
+      } else if (confirmRestoreTarget.type === "stored" && confirmRestoreTarget.filename) {
+        res = await fetch("/api/backup/restore", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: confirmRestoreTarget.filename })
+        });
+      } else {
+        throw new Error("No restore target selected");
+      }
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Restore operation failed");
+      }
+
+      setStatusMessage({
+        type: "success",
+        text: `Restore complete! Successfully restored ${data.result.stats.meetings} meetings, ${data.result.stats.audioFiles} audio files, ${data.result.stats.summaries} summaries, and ${data.result.stats.speakers} speakers.`
+      });
+
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setConfirmRestoreTarget(null);
+      onRestoreComplete();
+      await loadBackups();
+    } catch (err) {
+      setStatusMessage({ type: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRestoring(false);
+      setConfirmRestoreTarget(null);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-stone-100">Backup & Restore</h1>
+          <p className="text-sm text-stone-400">
+            Create complete portable archives of your database, settings, templates, transcripts, notes, and all audio files.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <a
+            href="/api/backup/export"
+            download
+            className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-xs font-semibold text-stone-950 transition hover:bg-lime-300 shadow"
+          >
+            <span>⬇️</span>
+            <span>Download Full Backup (.tar.gz)</span>
+          </a>
+          <button
+            type="button"
+            onClick={() => void handleCreateServerBackup()}
+            disabled={creating}
+            className="inline-flex items-center gap-2 rounded-lg border border-stone-700 bg-stone-900 px-4 py-2 text-xs font-semibold text-stone-200 transition hover:border-stone-500 hover:text-white disabled:opacity-50"
+          >
+            <span>💾</span>
+            <span>{creating ? "Creating Snapshot…" : "Save Server Snapshot"}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Status Alert */}
+      {statusMessage && (
+        <div
+          className={`rounded-xl border p-4 text-sm flex items-start justify-between ${
+            statusMessage.type === "success"
+              ? "border-lime-400/40 bg-lime-400/10 text-lime-300"
+              : statusMessage.type === "error"
+              ? "border-red-500/40 bg-red-500/10 text-red-300"
+              : "border-cyan-500/40 bg-cyan-500/10 text-cyan-300"
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <span>{statusMessage.type === "success" ? "✅" : statusMessage.type === "error" ? "❌" : "ℹ️"}</span>
+            <span>{statusMessage.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setStatusMessage(null)}
+            className="text-stone-400 hover:text-stone-200 text-xs px-2"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Restore from Upload Box */}
+      <div className="rounded-xl border border-stone-800 bg-stone-900/60 p-5 backdrop-blur">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-stone-300 mb-2">
+          Restore from Backup Archive
+        </h2>
+        <p className="text-xs text-stone-400 mb-4">
+          Select an Olive <code className="text-stone-300">.tar.gz</code> archive from your computer. All meetings, audio recordings, transcripts, summaries, and configuration will be restored.
+        </p>
+
+        <div className="flex flex-col sm:flex-row items-center gap-4">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".tar.gz,.tgz,application/gzip,application/x-gzip"
+            onChange={(e) => {
+              const file = e.target.files?.[0] || null;
+              setSelectedFile(file);
+            }}
+            className="block w-full text-xs text-stone-400 file:mr-4 file:rounded-lg file:border-0 file:bg-stone-800 file:px-4 file:py-2 file:text-xs file:font-semibold file:text-lime-400 hover:file:bg-stone-700 cursor-pointer"
+          />
+          {selectedFile && (
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmRestoreTarget({
+                  type: "file",
+                  filename: selectedFile.name,
+                  stats: { meetings: 0, audioFiles: 0, sizeBytes: selectedFile.size }
+                });
+              }}
+              className="whitespace-nowrap rounded-lg bg-amber-400 px-4 py-2 text-xs font-semibold text-stone-950 hover:bg-amber-300 transition shadow"
+            >
+              Restore Uploaded File
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Saved Backups Table */}
+      <div className="rounded-xl border border-stone-800 bg-stone-900/60 backdrop-blur overflow-hidden">
+        <div className="flex items-center justify-between border-b border-stone-800 px-5 py-4">
+          <div>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-stone-300">
+              Server Backup Snapshots
+            </h2>
+            <p className="text-xs text-stone-500">Stored on server persistent storage</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadBackups()}
+            disabled={loading}
+            className="rounded-lg border border-stone-800 bg-stone-950/60 px-3 py-1 text-xs text-stone-400 hover:text-stone-200 transition"
+          >
+            {loading ? "Refreshing…" : "🔄 Refresh List"}
+          </button>
+        </div>
+
+        {backups.length === 0 ? (
+          <div className="p-8 text-center text-stone-500 text-sm">
+            No backup snapshots currently saved on the server. Click &ldquo;Save Server Snapshot&rdquo; or &ldquo;Download Full Backup&rdquo; above.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-stone-300">
+              <thead className="border-b border-stone-800 bg-stone-950/40 text-stone-400 font-medium">
+                <tr>
+                  <th className="px-5 py-3">Archive File</th>
+                  <th className="px-5 py-3">Created</th>
+                  <th className="px-5 py-3">Size</th>
+                  <th className="px-5 py-3">Meetings</th>
+                  <th className="px-5 py-3">Audio Recordings</th>
+                  <th className="px-5 py-3">Summaries</th>
+                  <th className="px-5 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-800/60">
+                {backups.map((b) => (
+                  <tr key={b.filename} className="hover:bg-stone-800/30 transition">
+                    <td className="px-5 py-3.5 font-mono text-lime-400 font-medium">
+                      {b.filename}
+                    </td>
+                    <td className="px-5 py-3.5 text-stone-400">
+                      {formatDate(new Date(b.createdAt).getTime())}
+                    </td>
+                    <td className="px-5 py-3.5 font-mono text-stone-300">
+                      {formatBytes(b.sizeBytes)}
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <span className="rounded bg-stone-800 px-2 py-0.5 font-mono text-stone-200">
+                        {b.manifest?.stats.meetingCount ?? "—"}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="rounded bg-stone-800 px-2 py-0.5 font-mono text-stone-200">
+                          {b.manifest?.stats.audioFilesCount ?? "—"} files
+                        </span>
+                        {b.manifest?.stats.totalAudioSizeBytes ? (
+                          <span className="text-[10px] text-stone-500 font-mono">
+                            ({formatBytes(b.manifest.stats.totalAudioSizeBytes)})
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <span className="rounded bg-stone-800 px-2 py-0.5 font-mono text-stone-200">
+                        {b.manifest?.stats.summaryCount ?? "—"}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3.5 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <a
+                          href={`/api/backup/download/${encodeURIComponent(b.filename)}`}
+                          download
+                          className="rounded border border-stone-700 bg-stone-800 px-2.5 py-1 text-xs text-stone-200 hover:bg-stone-700 hover:text-white transition"
+                        >
+                          ⬇️ Download
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmRestoreTarget({
+                              type: "stored",
+                              filename: b.filename,
+                              stats: {
+                                meetings: b.manifest?.stats.meetingCount ?? 0,
+                                audioFiles: b.manifest?.stats.audioFilesCount ?? 0,
+                                sizeBytes: b.sizeBytes
+                              }
+                            });
+                          }}
+                          className="rounded border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-300 hover:bg-amber-500/20 transition"
+                        >
+                          ♻️ Restore
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteBackup(b.filename)}
+                          className="rounded border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-xs text-red-400 hover:bg-red-500/20 transition"
+                        >
+                          🗑️ Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Confirmation Modal for Restore */}
+      {confirmRestoreTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/80 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-amber-500/40 bg-stone-900 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-amber-400">
+              <span className="text-2xl">⚠️</span>
+              <h3 className="text-lg font-bold text-stone-100">Confirm System Restore</h3>
+            </div>
+
+            <p className="text-sm text-stone-300 leading-relaxed">
+              Restoring from <strong className="text-amber-300 font-mono">{confirmRestoreTarget.filename}</strong> will overwrite current meetings, audio recordings, transcripts, summaries, and configuration with the contents of this archive.
+            </p>
+
+            <div className="rounded-xl border border-stone-800 bg-stone-950 p-4 space-y-1.5 text-xs text-stone-400">
+              <div className="flex justify-between">
+                <span>Source Archive:</span>
+                <span className="font-mono text-stone-200">{confirmRestoreTarget.filename}</span>
+              </div>
+              {confirmRestoreTarget.stats?.sizeBytes && (
+                <div className="flex justify-between">
+                  <span>Archive Size:</span>
+                  <span className="font-mono text-stone-200">{formatBytes(confirmRestoreTarget.stats.sizeBytes)}</span>
+                </div>
+              )}
+              {confirmRestoreTarget.stats?.meetings ? (
+                <div className="flex justify-between">
+                  <span>Meetings included:</span>
+                  <span className="font-mono text-stone-200">{confirmRestoreTarget.stats.meetings}</span>
+                </div>
+              ) : null}
+              {confirmRestoreTarget.stats?.audioFiles ? (
+                <div className="flex justify-between">
+                  <span>Audio recordings included:</span>
+                  <span className="font-mono text-stone-200">{confirmRestoreTarget.stats.audioFiles}</span>
+                </div>
+              ) : null}
+            </div>
+
+            <p className="text-xs text-stone-500">
+              Note: An automatic rollback snapshot will be created in temporary storage before file replacement in case of unexpected errors.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmRestoreTarget(null)}
+                disabled={restoring}
+                className="rounded-lg border border-stone-700 px-4 py-2 text-xs font-medium text-stone-300 hover:bg-stone-800 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleExecuteRestore()}
+                disabled={restoring}
+                className="inline-flex items-center gap-2 rounded-lg bg-amber-400 px-4 py-2 text-xs font-bold text-stone-950 transition hover:bg-amber-300 disabled:opacity-50 shadow"
+              >
+                {restoring ? "Restoring System…" : "Yes, Restore System"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <App />
   </StrictMode>
 );
+

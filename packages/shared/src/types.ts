@@ -332,3 +332,43 @@ export interface MeetingDetailAggregate {
   summaryContent?: string | null;
   summaries: MeetingSummaryItem[];
 }
+
+export interface BackupManifestStats {
+  meetingCount: number;
+  recordingCount: number;
+  audioFilesCount: number;
+  totalAudioSizeBytes: number;
+  summaryCount: number;
+  speakerCount: number;
+  templateCount: number;
+}
+
+export interface BackupManifest {
+  version: string;
+  createdAt: string;
+  oliveVersion: string;
+  app: string;
+  stats: BackupManifestStats;
+}
+
+export interface BackupInfo {
+  filename: string;
+  sizeBytes: number;
+  createdAt: string;
+  manifest: BackupManifest | null;
+}
+
+export interface RestoreResult {
+  success: boolean;
+  restoredAt: string;
+  manifest: BackupManifest | null;
+  stats: {
+    meetings: number;
+    recordings: number;
+    audioFiles: number;
+    summaries: number;
+    speakers: number;
+    templates: number;
+  };
+}
+

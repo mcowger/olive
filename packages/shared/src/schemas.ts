@@ -205,3 +205,43 @@ export const llmGenerateInputSchema = z.object({
 
 export type UpdateLlmSettingsInput = z.infer<typeof updateLlmSettingsInputSchema>;
 export type LlmGenerateInput = z.infer<typeof llmGenerateInputSchema>;
+
+export const backupManifestStatsSchema = z.object({
+  meetingCount: z.number().int().nonnegative(),
+  recordingCount: z.number().int().nonnegative(),
+  audioFilesCount: z.number().int().nonnegative(),
+  totalAudioSizeBytes: z.number().int().nonnegative(),
+  summaryCount: z.number().int().nonnegative(),
+  speakerCount: z.number().int().nonnegative(),
+  templateCount: z.number().int().nonnegative()
+});
+
+export const backupManifestSchema = z.object({
+  version: z.string(),
+  createdAt: z.string(),
+  oliveVersion: z.string(),
+  app: z.string(),
+  stats: backupManifestStatsSchema
+});
+
+export const backupInfoSchema = z.object({
+  filename: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  manifest: backupManifestSchema.nullable()
+});
+
+export const restoreResultSchema = z.object({
+  success: z.boolean(),
+  restoredAt: z.string(),
+  manifest: backupManifestSchema.nullable(),
+  stats: z.object({
+    meetings: z.number().int().nonnegative(),
+    recordings: z.number().int().nonnegative(),
+    audioFiles: z.number().int().nonnegative(),
+    summaries: z.number().int().nonnegative(),
+    speakers: z.number().int().nonnegative(),
+    templates: z.number().int().nonnegative()
+  })
+});
+

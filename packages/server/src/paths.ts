@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 export interface OlivePaths {
   configDir: string;
   meetingsDir: string;
+  backupsDir: string;
   databasePath: string;
   settingsPath: string;
 }
@@ -27,10 +28,12 @@ export function resolvePaths(
 ): OlivePaths {
   const configDir = resolve(env.OLIVE_CONFIG_DIR || defaultConfigDir(platform, homeDir, env));
   const meetingsDir = resolve(env.OLIVE_MEETINGS_DIR || join(configDir, "meetings"));
+  const backupsDir = resolve(env.OLIVE_BACKUPS_DIR || join(configDir, "backups"));
 
   return {
     configDir,
     meetingsDir,
+    backupsDir,
     databasePath: join(configDir, "olive.sqlite"),
     settingsPath: join(configDir, "settings.json")
   };

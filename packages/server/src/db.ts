@@ -38,8 +38,10 @@ export function getDb(): Kysely<Database> {
 }
 
 export function setDbForTests(handle: DbHandle | undefined): void {
-  activeHandle?.db.destroy();
-  activeHandle?.sqlite.close();
+  try {
+    activeHandle?.db.destroy();
+    activeHandle?.sqlite.close(true);
+  } catch {}
   activeHandle = handle;
 }
 
@@ -49,6 +51,16 @@ export async function closeDb(): Promise<void> {
   }
 
   await activeHandle.db.destroy();
-  activeHandle.sqlite.close();
+  try {
+    activeHandle.sqlite.close(true);
+  } catch {}
   activeHandle = undefined;
 }
+
+export async function resetDbHandle(databasePath?: string): Promise<DbHandle> {
+  await closeDb();
+  const handle = createDb(databasePath || resolvePaths().databasePath);
+  activeHandle = handle;
+  return handle;
+}
+

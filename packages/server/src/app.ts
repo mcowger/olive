@@ -16,6 +16,7 @@ import { IngestService } from "./ingest/service.ts";
 import { TemplateService } from "./templates/service.ts";
 import { LlmService } from "./llm/service.ts";
 import { SummaryService } from "./summaries/service.ts";
+import { BackupService } from "./backup/service.ts";
 import { meetingPaths } from "./layout.ts";
 
 export interface AppOptions {
@@ -23,6 +24,7 @@ export interface AppOptions {
   webRoot?: string;
   configDir?: string;
   meetingsDir?: string;
+  backupsDir?: string;
   plaudClient?: PlaudClientLike;
   plaudPoller?: PlaudPoller;
   oauthManager?: PlaudOAuthManager;
@@ -36,6 +38,7 @@ export interface AppOptions {
   templateService?: TemplateService;
   llmService?: LlmService;
   summaryService?: SummaryService;
+  backupService?: BackupService;
   speechmaticsWebhookSecret?: string;
   ingestToken?: string;
 }
@@ -74,6 +77,7 @@ export function createApp(options: AppOptions = {}): Hono {
   const paths = resolvePaths();
   const configDir = options.configDir ?? paths.configDir;
   const meetingsDir = options.meetingsDir ?? paths.meetingsDir;
+  const backupsDir = options.backupsDir ?? paths.backupsDir;
   const speechmaticsWebhookSecret = options.speechmaticsWebhookSecret || process.env.SPEECHMATICS_WEBHOOK_SECRET;
 
   const speechmaticsClient = options.speechmaticsClient ?? new SpeechmaticsClient();
@@ -127,6 +131,16 @@ export function createApp(options: AppOptions = {}): Hono {
     });
 
   transcriptionService.setSummaryService(summaryService);
+
+  const backupService =
+    options.backupService ??
+    new BackupService({
+      db,
+      paths,
+      configDir,
+      meetingsDir,
+      backupsDir
+    });
 
   const plaudPoller =
     options.plaudPoller ??
@@ -827,6 +841,101 @@ export function createApp(options: AppOptions = {}): Hono {
       return c.json({ status: "completed" });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  // Backup & Restore API
+  app.post("/api/backup", async (c) => {
+    try {
+      let filename: string | undefined;
+      const contentType = c.req.header("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const body = (await c.req.json().catch(() => ({}))) as { filename?: string };
+        if (typeof body.filename === "string" && body.filename.trim()) {
+          filename = body.filename.trim();
+        }
+      }
+      const result = await backupService.createBackup({ filename });
+      return c.json({ ok: true, backup: result }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/backup/list", async (c) => {
+    try {
+      const backups = await backupService.listBackups();
+      return c.json({ ok: true, backups });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/backup/download/:filename", async (c) => {
+    const filename = c.req.param("filename");
+    try {
+      const fullPath = backupService.getBackupPath(filename);
+      const file = Bun.file(fullPath);
+      return new Response(file, {
+        headers: {
+          "Content-Type": "application/gzip",
+          "Content-Disposition": `attachment; filename="${filename}"`
+        }
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 404);
+    }
+  });
+
+  app.get("/api/backup/export", async (c) => {
+    try {
+      const result = await backupService.createBackup();
+      const file = Bun.file(result.path);
+      return new Response(file, {
+        headers: {
+          "Content-Type": "application/gzip",
+          "Content-Disposition": `attachment; filename="${result.filename}"`
+        }
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.delete("/api/backup/:filename", async (c) => {
+    const filename = c.req.param("filename");
+    try {
+      await backupService.deleteBackup(filename);
+      return c.json({ ok: true, message: `Backup ${filename} deleted` });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 404);
+    }
+  });
+
+  app.post("/api/backup/restore", async (c) => {
+    try {
+      const contentType = c.req.header("content-type") || "";
+      if (contentType.includes("multipart/form-data")) {
+        const formData = await c.req.formData();
+        const file = formData.get("file");
+        if (!file || !(file instanceof Blob)) {
+          return c.json({ error: "file field (backup .tar.gz archive) is required" }, 400);
+        }
+        const buffer = Buffer.from(await file.arrayBuffer());
+        const result = await backupService.restoreBackup(buffer);
+        return c.json({ ok: true, result });
+      } else if (contentType.includes("application/json")) {
+        const body = (await c.req.json().catch(() => ({}))) as { filename?: string };
+        if (!body.filename || typeof body.filename !== "string") {
+          return c.json({ error: "filename is required when restoring from stored backups" }, 400);
+        }
+        const result = await backupService.restoreBackup(body.filename);
+        return c.json({ ok: true, result });
+      } else {
+        return c.json({ error: "Content-Type must be multipart/form-data or application/json" }, 400);
+      }
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
 

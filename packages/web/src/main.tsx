@@ -1,6 +1,8 @@
-import { StrictMode, useEffect, useRef, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ReactElement } from "react";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
 import type {
   Artifact,
   BackupInfo,
@@ -63,6 +65,32 @@ function formatTimeOffset(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+marked.setOptions({
+  gfm: true,
+  breaks: true
+});
+
+function MarkdownRenderer({ content, className = "" }: { content: string; className?: string }): ReactElement {
+  const renderedHtml = useMemo(() => {
+    if (!content) return "";
+    try {
+      const raw = marked.parse(content) as string;
+      return DOMPurify.sanitize(raw, {
+        USE_PROFILES: { html: true }
+      });
+    } catch {
+      return content;
+    }
+  }, [content]);
+
+  return (
+    <div
+      className={`prose prose-invert prose-stone max-w-none text-stone-200 prose-headings:font-semibold prose-headings:tracking-tight prose-headings:text-stone-100 prose-h1:text-xl prose-h1:border-b prose-h1:border-stone-800 prose-h1:pb-2 prose-h2:text-lg prose-h2:border-b prose-h2:border-stone-800/60 prose-h2:pb-1.5 prose-h3:text-base prose-h4:text-sm prose-p:leading-relaxed prose-p:my-3 prose-ul:my-2 prose-ul:list-disc prose-ol:my-2 prose-ol:list-decimal prose-li:my-1 prose-a:text-lime-400 hover:prose-a:text-lime-300 prose-strong:text-stone-100 prose-blockquote:border-l-2 prose-blockquote:border-lime-400/40 prose-blockquote:bg-stone-900/60 prose-blockquote:py-1 prose-blockquote:px-4 prose-blockquote:rounded-r prose-blockquote:text-stone-300 prose-blockquote:not-italic prose-code:text-lime-300 prose-code:bg-stone-800/90 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:font-mono prose-code:text-xs prose-code:before:content-none prose-code:after:content-none prose-pre:bg-stone-950 prose-pre:border prose-pre:border-stone-800 prose-pre:rounded-xl prose-table:my-4 prose-table:w-full prose-table:text-left prose-th:border-b prose-th:border-stone-700 prose-th:py-2 prose-th:px-3 prose-th:text-stone-300 prose-th:font-semibold prose-td:border-b prose-td:border-stone-800 prose-td:py-2 prose-td:px-3 prose-hr:border-stone-800 ${className}`}
+      dangerouslySetInnerHTML={{ __html: renderedHtml }}
+    />
+  );
 }
 
 type TabKey = "meetings" | "speakers" | "templates" | "logs" | "backup";
@@ -746,6 +774,7 @@ function MeetingDetailView({
   const [reassigningSpeaker, setReassigningSpeaker] = useState<string | null>(null);
   const [showSummaryModal, setShowSummaryModal] = useState(false);
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
+  const [summaryViewMode, setSummaryViewMode] = useState<"rendered" | "raw">("rendered");
   const [regenerating, setRegenerating] = useState(false);
   const [copied, setCopied] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -1152,7 +1181,33 @@ function MeetingDetailView({
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Rendered vs Raw view toggle */}
+                        <div className="inline-flex rounded-lg border border-stone-700 bg-stone-800 p-0.5 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setSummaryViewMode("rendered")}
+                            className={`rounded px-2.5 py-1 font-medium transition ${
+                              summaryViewMode === "rendered"
+                                ? "bg-lime-400/20 text-lime-300 font-semibold shadow-sm"
+                                : "text-stone-400 hover:text-stone-200"
+                            }`}
+                          >
+                            👁️ Preview
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSummaryViewMode("raw")}
+                            className={`rounded px-2.5 py-1 font-medium transition ${
+                              summaryViewMode === "raw"
+                                ? "bg-stone-700 text-stone-200 font-semibold shadow-sm"
+                                : "text-stone-400 hover:text-stone-200"
+                            }`}
+                          >
+                            📝 Raw
+                          </button>
+                        </div>
+
                         {!activeSummary.isPrimary && (
                           <button
                             type="button"
@@ -1179,9 +1234,13 @@ function MeetingDetailView({
                       </div>
                     </div>
 
-                    <div className="prose prose-invert max-w-none text-sm leading-relaxed text-stone-200 whitespace-pre-wrap font-sans">
-                      {activeSummary.content}
-                    </div>
+                    {summaryViewMode === "rendered" ? (
+                      <MarkdownRenderer content={activeSummary.content} />
+                    ) : (
+                      <pre className="whitespace-pre-wrap font-mono text-xs text-stone-300 rounded-xl border border-stone-800 bg-stone-950/80 p-4 overflow-x-auto leading-relaxed">
+                        {activeSummary.content}
+                      </pre>
+                    )}
                   </div>
                 )}
               </div>

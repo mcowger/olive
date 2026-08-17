@@ -1,4 +1,10 @@
-import { coalesceSpeakerSegments, type EnrolledSpeaker, type Transcript, type TranscriptSegment } from "@olive/shared";
+import {
+  coalesceSpeakerSegments,
+  type EnrolledSpeaker,
+  type Transcript,
+  type TranscriptSegment,
+  type TranscriptionProgressUpdate
+} from "@olive/shared";
 import { decodeWav, loadAudioSamples, resample } from "./wav.ts";
 import {
   AcousticFeatureEmbeddingExtractor,
@@ -16,6 +22,8 @@ import type {
   VoiceprintVector
 } from "./types.ts";
 
+export type TranscriptionProgressCallback = (update: TranscriptionProgressUpdate) => void | Promise<void>;
+
 export interface TranscribeAudioOptions {
   audioPath?: string;
   audioBytes?: Uint8Array;
@@ -23,6 +31,7 @@ export interface TranscribeAudioOptions {
   enrolledSpeakers?: EnrolledSpeaker[];
   similarityThreshold?: number;
   clusteringThreshold?: number;
+  onProgress?: TranscriptionProgressCallback;
 }
 
 export class LocalTranscriptionPipeline {
@@ -59,11 +68,24 @@ export class LocalTranscriptionPipeline {
    * speaker diarization and cross-recording speaker identification.
    */
   async transcribe(options: TranscribeAudioOptions): Promise<LocalTranscriptionResult> {
+    await options.onProgress?.({
+      stage: "decoding",
+      percent: 5,
+      message: "Enhancing speech audio & decoding 16kHz samples..."
+    });
+
     // 1. Decode audio (WAV, MP3, M4A, etc.) to 16kHz mono Float32Array
     const targetSampleRate = 16000;
     const decoded = await loadAudioSamples(options, targetSampleRate);
     const samples = decoded.samples;
     const durationMs = decoded.durationMs;
+
+    await options.onProgress?.({
+      stage: "diarizing",
+      percent: 15,
+      totalMs: durationMs,
+      message: "Detecting speech activity & clustering speaker turns..."
+    });
 
     // 2. Perform Speaker Diarization
     const speakerSegments = await this.diarizer.diarize(
@@ -71,6 +93,15 @@ export class LocalTranscriptionPipeline {
       targetSampleRate,
       options.clusteringThreshold
     );
+
+    const totalSegments = speakerSegments.length;
+    await options.onProgress?.({
+      stage: "diarizing",
+      percent: 25,
+      total: totalSegments,
+      totalMs: durationMs,
+      message: `Identified ${totalSegments} speech segments. Matching enrolled profiles...`
+    });
 
     // 3. Prepare enrolled speaker voiceprints for cross-recording matching
     const enrolledProfiles = new Map<string, { id: string; name: string; centroid: VoiceprintVector }>();
@@ -101,7 +132,11 @@ export class LocalTranscriptionPipeline {
     const clusterToResolvedName = new Map<string, string>();
 
     // 4. Match speaker segments across recordings & update voiceprint centroids
-    for (const seg of speakerSegments) {
+    for (let i = 0; i < speakerSegments.length; i++) {
+      const seg = speakerSegments[i];
+      const currentNumber = i + 1;
+      const progressPercent = Math.min(95, Math.round(25 + ((i + 0.5) / Math.max(1, totalSegments)) * 70));
+
       const segEmbedding = seg.embedding ?? (await this.embeddingExtractor.extract(seg.samples, targetSampleRate));
 
       let resolvedSpeakerName = clusterToResolvedName.get(seg.speakerId);
@@ -155,6 +190,17 @@ export class LocalTranscriptionPipeline {
         }
       }
 
+      await options.onProgress?.({
+        stage: "transcribing",
+        percent: progressPercent,
+        current: currentNumber,
+        total: totalSegments,
+        currentMs: seg.startMs,
+        totalMs: durationMs,
+        speaker: resolvedSpeakerName || seg.speakerId,
+        message: `Transcribing segment ${currentNumber} of ${totalSegments} (${progressPercent}%)`
+      });
+
       // 5. Transcribe the audio segment
       const asrResult = await this.asrEngine.transcribeSegment(
         seg.samples,
@@ -173,6 +219,13 @@ export class LocalTranscriptionPipeline {
         words: asrResult.words
       });
     }
+
+    await options.onProgress?.({
+      stage: "finalizing",
+      percent: 98,
+      totalMs: durationMs,
+      message: "Coalescing turns & formatting transcript artifacts..."
+    });
 
     // 6. Coalesce consecutive segments from the same speaker into natural conversational turns
     const coalescedSegments = coalesceSpeakerSegments(finalSegments);

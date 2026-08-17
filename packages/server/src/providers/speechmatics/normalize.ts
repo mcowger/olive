@@ -117,7 +117,8 @@ export function parseSpeechmaticsJsonV2(json: RetrieveTranscriptResponse | Speec
   return {
     segments,
     language,
-    durationMs
+    durationMs,
+    speakers: (json.speakers ?? []) as any[]
   };
 }
 

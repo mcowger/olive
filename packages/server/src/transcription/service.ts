@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Kysely } from "kysely";
-import type { Database, EnrolledSpeaker, Transcript } from "@olive/shared";
+import type { Database, EnrolledSpeaker, Transcript, TranscriptionProgressUpdate } from "@olive/shared";
 import { ensureMeetingFolder, meetingPaths } from "../layout.ts";
 import { logger as defaultLogger, type Logger } from "../logger.ts";
 import {
@@ -48,6 +48,7 @@ export interface TranscribeMeetingOptions {
   force?: boolean;
   similarityThreshold?: number;
   clusteringThreshold?: number;
+  onProgress?: (update: TranscriptionProgressUpdate) => void | Promise<void>;
 }
 
 export interface TranscribeMeetingResult {
@@ -263,7 +264,8 @@ export class TranscriptionService {
         language: options.language,
         enrolledSpeakers,
         similarityThreshold: options.similarityThreshold,
-        clusteringThreshold: options.clusteringThreshold
+        clusteringThreshold: options.clusteringThreshold,
+        onProgress: options.onProgress
       });
 
       // 3. Write artifacts to disk
@@ -427,6 +429,12 @@ export class TranscriptionService {
       };
     }
 
+    await options.onProgress?.({
+      stage: "decoding",
+      percent: 5,
+      message: "Preparing audio and speaker profiles for Speechmatics..."
+    });
+
     const stageRunId = stageRun?.id ?? randomUUID();
     const currentTime = this.now();
 
@@ -442,6 +450,12 @@ export class TranscriptionService {
     const webhookUrl = this.webhookUrl
       ? `${this.webhookUrl}?meetingId=${encodeURIComponent(meetingId)}&stageRunId=${encodeURIComponent(stageRunId)}`
       : undefined;
+
+    await options.onProgress?.({
+      stage: "diarizing",
+      percent: 15,
+      message: "Uploading audio to Speechmatics Cloud API..."
+    });
 
     let submitResult;
     try {
@@ -535,13 +549,20 @@ export class TranscriptionService {
         .execute();
     }
 
+    await options.onProgress?.({
+      stage: "transcribing",
+      percent: 25,
+      message: `Job ${submitResult.id.slice(0, 10)}... accepted by Speechmatics. Cloud processing...`
+    });
+
     if (options.poll) {
       return await this.pollUntilComplete(
         meetingId,
         stageRunId,
         submitResult.id,
         options.pollIntervalMs ?? 2000,
-        options.maxPollWaitMs ?? 180_000
+        options.maxPollWaitMs ?? 180_000,
+        options.onProgress
       );
     }
 
@@ -557,16 +578,44 @@ export class TranscriptionService {
     stageRunId: string,
     jobId: string,
     intervalMs = 2000,
-    maxWaitMs = 180_000
+    maxWaitMs = 180_000,
+    onProgress?: (update: TranscriptionProgressUpdate) => void | Promise<void>
   ): Promise<TranscribeMeetingResult> {
     const startTime = this.now();
+    let pollCount = 0;
 
     while (this.now() - startTime < maxWaitMs) {
+      pollCount++;
+      const elapsedMs = this.now() - startTime;
+      const elapsedSec = Math.round(elapsedMs / 1000);
+      const percent = Math.min(92, Math.round(25 + Math.min(67, (elapsedSec / 45) * 67)));
+
+      await onProgress?.({
+        stage: "transcribing",
+        percent,
+        currentMs: elapsedMs,
+        message: `Speechmatics cloud processing (poll #${pollCount}, ${elapsedSec}s elapsed)...`
+      });
+
       const status = await this.client.getJob(jobId);
 
       if (status.status === "done") {
+        await onProgress?.({
+          stage: "finalizing",
+          percent: 96,
+          message: "Downloading transcript JSON & enrolling speaker voiceprints..."
+        });
+
         const jsonV2 = (await this.client.getTranscript(jobId, "json-v2")) as SpeechmaticsJsonV2;
-        return await this.completeTranscription(meetingId, stageRunId, jobId, jsonV2);
+        const res = await this.completeTranscription(meetingId, stageRunId, jobId, jsonV2);
+
+        await onProgress?.({
+          stage: "done",
+          percent: 100,
+          message: "Speechmatics transcription complete!"
+        });
+
+        return res;
       }
 
       if (status.status === "rejected" || status.status === "deleted") {
@@ -875,13 +924,15 @@ export class TranscriptionService {
           providerIds[PROVIDER_SPEECHMATICS] = speakerIdentifiers;
         }
 
+        const isPlaceholder = /^speaker\s*\d+$/i.test(name.trim()) || /^s\d+$/i.test(name.trim());
+
         await this.db
           .insertInto("speakers")
           .values({
             id: speakerId,
             name,
             provider_ids: JSON.stringify(providerIds),
-            enrolled_at: speakerIdentifiers.length > 0 ? currentTime : null,
+            enrolled_at: !isPlaceholder && speakerIdentifiers.length > 0 ? currentTime : null,
             enrollment_clip_paths: "[]",
             created_at: currentTime
           })
@@ -904,19 +955,31 @@ export class TranscriptionService {
 
   private async getEnrolledSpeakers(): Promise<EnrolledSpeaker[]> {
     const rows = await this.db.selectFrom("speakers").selectAll().execute();
-    return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      providerIds: parseJsonField<Record<string, string[]>>(row.provider_ids, {})
-    }));
+    return rows
+      .filter((row) => {
+        const name = row.name.trim();
+        const isPlaceholder = /^speaker\s*\d+$/i.test(name) || /^s\d+$/i.test(name);
+        return !isPlaceholder;
+      })
+      .map((row) => ({
+        id: row.id,
+        name: row.name,
+        providerIds: parseJsonField<Record<string, string[]>>(row.provider_ids, {})
+      }));
   }
 
   private async getEnrolledSpeechmaticsSpeakers(): Promise<EnrolledSpeaker[]> {
     const rows = await this.db.selectFrom("speakers").selectAll().execute();
-    return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      providerIds: parseJsonField<Record<string, string[]>>(row.provider_ids, {})
-    }));
+    return rows
+      .filter((row) => {
+        const name = row.name.trim();
+        const isPlaceholder = /^speaker\s*\d+$/i.test(name) || /^s\d+$/i.test(name);
+        return !isPlaceholder;
+      })
+      .map((row) => ({
+        id: row.id,
+        name: row.name,
+        providerIds: parseJsonField<Record<string, string[]>>(row.provider_ids, {})
+      }));
   }
 }

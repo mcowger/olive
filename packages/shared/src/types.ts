@@ -232,6 +232,26 @@ export interface Transcript {
   segments: TranscriptSegment[];
   language?: string;
   durationMs?: number;
+  speakers?: Array<{
+    label?: string;
+    speaker?: string;
+    speaker_identifiers?: string[];
+  }>;
+}
+
+export type TranscriptionProgressStage = "decoding" | "diarizing" | "transcribing" | "finalizing" | "done" | "error";
+
+export interface TranscriptionProgressUpdate {
+  stage: TranscriptionProgressStage;
+  percent: number;
+  message: string;
+  current?: number;
+  total?: number;
+  currentMs?: number;
+  totalMs?: number;
+  speaker?: string;
+  stageRunId?: string;
+  error?: string;
 }
 
 /**

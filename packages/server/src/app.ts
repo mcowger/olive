@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { join, normalize, relative } from "node:path";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import type { Kysely } from "kysely";
 import type { Database, LogItem, LogLevel } from "@olive/shared";
 import { logger } from "./logger.ts";
@@ -360,6 +361,7 @@ export function createApp(options: AppOptions = {}): Hono {
       maxPollWaitMs?: number;
       similarityThreshold?: number;
       clusteringThreshold?: number;
+      stream?: boolean;
     } = {};
     try {
       body = (await c.req.json()) as typeof body;
@@ -377,6 +379,65 @@ export function createApp(options: AppOptions = {}): Hono {
           if (similarityThreshold === undefined) similarityThreshold = cfg.localSimilarityThreshold;
           if (clusteringThreshold === undefined) clusteringThreshold = cfg.localClusteringThreshold;
         } catch {}
+      }
+
+      const wantsStream =
+        body.stream === true ||
+        c.req.query("stream") === "true" ||
+        (c.req.header("accept") || "").includes("text/event-stream");
+
+      if (wantsStream) {
+        return streamSSE(c, async (stream) => {
+          try {
+            await stream.writeSSE({
+              event: "progress",
+              data: JSON.stringify({
+                stage: "decoding",
+                percent: 2,
+                message: "Initializing transcription..."
+              })
+            });
+
+            const result = await transcriptionService.transcribeMeeting(meetingId, {
+              provider: body.provider,
+              language: body.language,
+              poll: body.poll,
+              force: body.force,
+              pollIntervalMs: body.pollIntervalMs,
+              maxPollWaitMs: body.maxPollWaitMs,
+              similarityThreshold,
+              clusteringThreshold,
+              onProgress: async (update) => {
+                try {
+                  await stream.writeSSE({
+                    event: "progress",
+                    data: JSON.stringify(update)
+                  });
+                } catch {}
+              }
+            });
+
+            await stream.writeSSE({
+              event: "result",
+              data: JSON.stringify({
+                stage: "done",
+                percent: 100,
+                message: "Transcription complete!",
+                result
+              })
+            });
+          } catch (err) {
+            await stream.writeSSE({
+              event: "error",
+              data: JSON.stringify({
+                stage: "error",
+                percent: 0,
+                message: err instanceof Error ? err.message : String(err),
+                error: err instanceof Error ? err.message : String(err)
+              })
+            });
+          }
+        });
       }
 
       const result = await transcriptionService.transcribeMeeting(meetingId, {

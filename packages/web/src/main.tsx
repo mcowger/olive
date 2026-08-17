@@ -18,7 +18,8 @@ import type {
   RestoreResult,
   Speaker,
   StageRunRow,
-  Template
+  Template,
+  TranscriptionProgressUpdate
 } from "@olive/shared";
 
 interface MeetingsResponse {
@@ -766,6 +767,7 @@ function MeetingDetailView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [transcribing, setTranscribing] = useState(false);
+  const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionProgressUpdate | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<"local" | "speechmatics">("local");
   const [showDiarizationSettings, setShowDiarizationSettings] = useState(false);
   const [customClusteringThreshold, setCustomClusteringThreshold] = useState(0.85);
@@ -811,10 +813,19 @@ function MeetingDetailView({
 
   const handleTriggerTranscription = async () => {
     setTranscribing(true);
+    setTranscriptionProgress({
+      stage: "decoding",
+      percent: 3,
+      message: "Starting transcription pipeline..."
+    });
+
     try {
-      const res = await fetch(`/api/meetings/${meetingId}/transcribe`, {
+      const res = await fetch(`/api/meetings/${meetingId}/transcribe?stream=true`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "accept": "text/event-stream"
+        },
         body: JSON.stringify({
           provider: selectedProvider,
           poll: true,
@@ -823,15 +834,63 @@ function MeetingDetailView({
           similarityThreshold: selectedProvider === "local" ? customSimilarityThreshold : undefined
         })
       });
+
       if (!res.ok) {
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${res.status}`);
       }
+
+      // Stream SSE progress updates if readable stream is returned
+      if (res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const blocks = buffer.split("\n\n");
+          buffer = blocks.pop() || "";
+
+          for (const block of blocks) {
+            const lines = block.split("\n");
+            let event = "message";
+            let dataStr = "";
+
+            for (const line of lines) {
+              if (line.startsWith("event:")) {
+                event = line.replace(/^event:\s*/, "").trim();
+              } else if (line.startsWith("data:")) {
+                dataStr += line.replace(/^data:\s*/, "").trim();
+              }
+            }
+
+            if (dataStr) {
+              try {
+                const data = JSON.parse(dataStr);
+                if (event === "progress" || event === "result") {
+                  setTranscriptionProgress(data);
+                } else if (event === "error") {
+                  throw new Error(data.error || data.message || "Transcription failed");
+                }
+              } catch (e) {
+                if (e instanceof Error && e.message !== "Unexpected end of JSON input") {
+                  // ignore partial JSON parse errors
+                }
+              }
+            }
+          }
+        }
+      }
+
       await fetchDetail();
     } catch (err) {
       alert(`Transcription error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setTranscribing(false);
+      setTimeout(() => setTranscriptionProgress(null), 4000);
     }
   };
 
@@ -979,12 +1038,85 @@ function MeetingDetailView({
                 type="button"
                 disabled={transcribing}
                 onClick={() => void handleTriggerTranscription()}
-                className="rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-75 disabled:cursor-not-allowed shadow-md"
               >
-                {transcribing ? "Transcribing…" : "Transcribe"}
+                {transcribing && (
+                  <svg className="h-4 w-4 animate-spin text-stone-950" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                )}
+                <span>
+                  {transcribing
+                    ? transcriptionProgress
+                      ? transcriptionProgress.stage === "diarizing"
+                        ? `Diarizing (${transcriptionProgress.percent || 15}%)…`
+                        : transcriptionProgress.stage === "decoding"
+                        ? "Enhancing Audio…"
+                        : `Transcribing (${transcriptionProgress.percent || 25}%)…`
+                      : "Transcribing…"
+                    : "Transcribe"}
+                </span>
               </button>
             </div>
           </header>
+
+          {/* Live Transcription Progress Banner */}
+          {transcriptionProgress && (
+            <div className="rounded-xl border border-lime-500/30 bg-stone-900/95 p-4 shadow-xl space-y-3 animate-in fade-in duration-200">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-lime-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-lime-400"></span>
+                  </span>
+                  <span className="font-semibold text-stone-200 uppercase tracking-wide">
+                    {selectedProvider === "local" ? "Local SOTA Pipeline (Cohere 2B + VAD)" : "Speechmatics Cloud"}
+                  </span>
+                  <span className="text-stone-500">•</span>
+                  <span className="text-lime-300 font-medium capitalize">
+                    {transcriptionProgress.stage}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-3 font-mono text-xs">
+                  {transcriptionProgress.current && transcriptionProgress.total && (
+                    <span className="text-stone-300">
+                      Segment <strong className="text-lime-300">{transcriptionProgress.current}</strong> / {transcriptionProgress.total}
+                    </span>
+                  )}
+                  {transcriptionProgress.currentMs !== undefined && transcriptionProgress.totalMs && (
+                    <span className="text-stone-400">
+                      {formatTimeOffset(transcriptionProgress.currentMs)} / {formatTimeOffset(transcriptionProgress.totalMs)}
+                    </span>
+                  )}
+                  <span className="font-bold text-lime-400 text-sm">
+                    {transcriptionProgress.percent}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="h-2 w-full overflow-hidden rounded-full bg-stone-800">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-lime-500 via-lime-400 to-cyan-400 transition-all duration-300 ease-out shadow-[0_0_12px_rgba(163,230,53,0.5)]"
+                  style={{ width: `${Math.max(3, Math.min(100, transcriptionProgress.percent))}%` }}
+                />
+              </div>
+
+              {/* Status Message */}
+              <div className="flex items-center justify-between text-xs text-stone-400">
+                <p className="truncate text-stone-300">
+                  {transcriptionProgress.message}
+                </p>
+                {transcriptionProgress.speaker && (
+                  <span className="shrink-0 rounded bg-stone-800 px-2 py-0.5 text-[11px] font-medium text-cyan-300 border border-stone-700">
+                    Speaker: {transcriptionProgress.speaker}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Expandable Diarization Threshold Tuning */}
           {showDiarizationSettings && selectedProvider === "local" && (

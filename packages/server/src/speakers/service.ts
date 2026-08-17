@@ -456,10 +456,11 @@ export class SpeakerService {
         const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
         let adoptedAny = false;
 
-        // A. Adopt Speechmatics voiceprint identifiers if in transcript metadata
+        // A. Adopt Speechmatics voiceprint identifiers if in transcript metadata or on disk
         const extractedIds: string[] = [];
-        const speakerList = (parsedData.speakers ?? []) as any[];
 
+        // 1. From current parsed transcript
+        const speakerList = (parsedData.speakers ?? []) as any[];
         for (const s of speakerList) {
           const label = (s.label || s.speaker || "").trim().toLowerCase();
           if (label === normalizedFrom && s.speaker_identifiers) {
@@ -470,6 +471,40 @@ export class SpeakerService {
               if (id && !extractedIds.includes(id)) {
                 extractedIds.push(id);
               }
+            }
+          }
+        }
+
+        // 2. From transcripts/speechmatics.json in meeting folder if exists
+        const smJsonPath = join(folder, "transcripts/speechmatics.json");
+        if (existsSync(smJsonPath)) {
+          try {
+            const smRaw = JSON.parse(await readFile(smJsonPath, "utf8"));
+            const smSpeakerList = (smRaw.speakers ?? []) as any[];
+            for (const s of smSpeakerList) {
+              const label = (s.label || s.speaker || "").trim().toLowerCase();
+              if (label === normalizedFrom && s.speaker_identifiers) {
+                const ids = Array.isArray(s.speaker_identifiers)
+                  ? s.speaker_identifiers
+                  : Array.from(s.speaker_identifiers);
+                for (const id of ids as string[]) {
+                  if (id && !extractedIds.includes(id)) {
+                    extractedIds.push(id);
+                  }
+                }
+              }
+            }
+          } catch {}
+        }
+
+        // 3. From fromLabel speaker in database if present
+        const allDbSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
+        const fromSpeaker = allDbSpeakers.find((s) => s.name.trim().toLowerCase() === normalizedFrom);
+        if (fromSpeaker) {
+          const fromProviderIds = parseJsonField<Record<string, string[]>>(fromSpeaker.provider_ids, {});
+          for (const id of fromProviderIds.speechmatics ?? []) {
+            if (id && !extractedIds.includes(id)) {
+              extractedIds.push(id);
             }
           }
         }
@@ -548,6 +583,56 @@ export class SpeakerService {
 
                   if (!clips.includes(clipRelativePath)) {
                     clips.push(clipRelativePath);
+                  }
+
+                  // 3. If Speechmatics identifiers are missing and client is configured, enroll audio slice directly
+                  if (this.client?.isConfigured && (!providerIds.speechmatics || providerIds.speechmatics.length === 0)) {
+                    try {
+                      const enrollJob = await this.client.submitJob({
+                        audio: clipWavBytes,
+                        filename: clipFilename,
+                        mime: "audio/wav",
+                        language: "en",
+                        getSpeakers: true
+                      });
+
+                      const startWait = this.now();
+                      while (this.now() - startWait < 60_000) {
+                        const status = await this.client.getJob(enrollJob.id);
+                        if (status.status === "done") {
+                          const smEnrollJson = (await this.client.getTranscript(enrollJob.id, "json-v2")) as SpeechmaticsJsonV2;
+                          for (const s of (smEnrollJson.speakers ?? []) as any[]) {
+                            const ids = Array.isArray(s.speaker_identifiers)
+                              ? s.speaker_identifiers
+                              : Array.from(s.speaker_identifiers ?? []);
+                            for (const id of ids as string[]) {
+                              if (id && !extractedIds.includes(id)) {
+                                extractedIds.push(id);
+                              }
+                            }
+                          }
+                          try {
+                            await this.client.deleteJob(enrollJob.id);
+                          } catch {}
+                          break;
+                        }
+                        if (status.status === "rejected" || status.status === "deleted") break;
+                        await new Promise((r) => setTimeout(r, 1500));
+                      }
+
+                      if (extractedIds.length > 0) {
+                        const currentSmIds = new Set(providerIds.speechmatics ?? []);
+                        for (const id of extractedIds) {
+                          currentSmIds.add(id);
+                        }
+                        providerIds.speechmatics = Array.from(currentSmIds);
+                        adoptedAny = true;
+                      }
+                    } catch (smErr) {
+                      this.logger.warn("Could not enroll audio slice with Speechmatics", {
+                        error: smErr instanceof Error ? smErr.message : String(smErr)
+                      });
+                    }
                   }
                 }
               }
@@ -1186,8 +1271,10 @@ export class SpeakerService {
       }
     }
 
-    // Clean up orphaned placeholder speakers
+    // Clean up orphaned placeholder speakers and transfer any orphan Speechmatics identifiers to real speakers if applicable
     const allSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
+    const namedSpeakers = allSpeakers.filter((s) => !(/^speaker\s*\d+$/i.test(s.name.trim()) || /^s\d+$/i.test(s.name.trim())));
+
     for (const s of allSpeakers) {
       const isPlaceholder = /^speaker\s*\d+$/i.test(s.name.trim()) || /^s\d+$/i.test(s.name.trim());
       const links = await this.db
@@ -1197,10 +1284,38 @@ export class SpeakerService {
         .execute();
 
       const clips = parseJsonField<string[]>(s.enrollment_clip_paths, []);
+      const providerIds = parseJsonField<Record<string, string[]>>(s.provider_ids, {});
+
+      // If this placeholder has speechmatics identifiers and only 1 named speaker exists (e.g. Matt Cowger), transfer if missing
+      if (isPlaceholder && providerIds.speechmatics?.length && namedSpeakers.length > 0) {
+        const primaryUser = namedSpeakers.find((ns) => ns.name.toLowerCase().includes("matt")) || namedSpeakers[0];
+        if (primaryUser) {
+          const userProviderIds = parseJsonField<Record<string, string[]>>(primaryUser.provider_ids, {});
+          if (!userProviderIds.speechmatics?.length) {
+            userProviderIds.speechmatics = providerIds.speechmatics;
+            await this.db
+              .updateTable("speakers")
+              .set({
+                provider_ids: JSON.stringify(userProviderIds),
+                enrolled_at: primaryUser.enrolled_at ?? this.now()
+              })
+              .where("id", "=", primaryUser.id)
+              .execute();
+          }
+        }
+      }
+
       if (links.length === 0 && (isPlaceholder || (clips.length === 0 && !s.enrolled_at))) {
         await this.db.deleteFrom("speakers").where("id", "=", s.id).execute();
         prunedSpeakers++;
       }
+    }
+
+    // Auto cross-fill voiceprints across providers if client is configured
+    if (this.client?.isConfigured) {
+      try {
+        await this.backfillVoiceprints({ force: false });
+      } catch {}
     }
 
     return { repairedMeetings, prunedSpeakers };

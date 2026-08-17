@@ -275,11 +275,31 @@ export async function getMeeting(
   // Sort summaries newest first
   summaries.sort((a, b) => b.createdAt - a.createdAt);
 
+  let activeSpeakerRows = speakerRows;
+  if (transcriptContent) {
+    try {
+      const parsed = JSON.parse(transcriptContent);
+      const segs = Array.isArray(parsed.segments)
+        ? parsed.segments
+        : Array.isArray(parsed)
+        ? parsed
+        : [];
+      const namesInTranscript = new Set(
+        segs.map((s: any) => (s.speaker || s.name || "").trim().toLowerCase()).filter(Boolean)
+      );
+      if (namesInTranscript.size > 0) {
+        activeSpeakerRows = speakerRows.filter((s) => namesInTranscript.has(s.name.trim().toLowerCase()));
+      }
+    } catch {
+      // ignore json parse errors
+    }
+  }
+
   return {
     meeting: toMeeting(meetingRow),
     recordings: recordingRows.map((r) => toRecording(r)),
     artifacts: artifactRows.map((a) => toArtifact(a)),
-    speakers: speakerRows.map((s) => toSpeaker(s)),
+    speakers: activeSpeakerRows.map((s) => toSpeaker(s)),
     stageRuns,
     transcriptContent,
     summaryContent,

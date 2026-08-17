@@ -3,6 +3,7 @@ import { join, normalize, relative } from "node:path";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Database, LogItem, LogLevel } from "@olive/shared";
+import { logger } from "./logger.ts";
 import { loadAppConfig, saveAppConfig } from "./config.ts";
 import { getDb } from "./db.ts";
 import { resolvePaths } from "./paths.ts";
@@ -33,6 +34,7 @@ export interface AppOptions {
   authSessions?: PlaudAuthSessionStore;
   pollIntervalMinutes?: number;
   startPlaudPoller?: boolean;
+  syncOnStartup?: boolean;
   speechmaticsClient?: SpeechmaticsClient;
   transcriptionService?: TranscriptionService;
   speakerService?: SpeakerService;
@@ -167,6 +169,18 @@ export function createApp(options: AppOptions = {}): Hono {
     });
   const oauthManager = options.oauthManager ?? plaudPoller.oauth;
   const authSessions = options.authSessions ?? new PlaudAuthSessionStore();
+
+  if (options.startPlaudPoller || options.syncOnStartup) {
+    void speakerService.syncMeetingSpeakersAndTranscripts().then((res) => {
+      if (res.repairedMeetings > 0 || res.prunedSpeakers > 0) {
+        logger.info("Synchronized meeting speakers and transcripts on startup", res);
+      }
+    }).catch((err) => {
+      logger.warn("Could not sync meeting speakers and transcripts on startup", {
+        error: err instanceof Error ? err.message : String(err)
+      });
+    });
+  }
 
   app.get("/api/health", (c) => c.json({ status: "ok" }));
 

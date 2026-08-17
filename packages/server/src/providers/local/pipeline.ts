@@ -1,4 +1,4 @@
-import type { EnrolledSpeaker, Transcript, TranscriptSegment } from "@olive/shared";
+import { coalesceSpeakerSegments, type EnrolledSpeaker, type Transcript, type TranscriptSegment } from "@olive/shared";
 import { decodeWav, loadAudioSamples, resample } from "./wav.ts";
 import {
   AcousticFeatureEmbeddingExtractor,
@@ -190,46 +190,4 @@ export class LocalTranscriptionPipeline {
   }
 }
 
-/**
- * Merges consecutive segments from the same speaker if the silence gap between them is reasonable (< 3000ms).
- */
-export function coalesceSpeakerSegments(segments: TranscriptSegment[], maxGapMs = 3000): TranscriptSegment[] {
-  if (segments.length <= 1) {
-    return segments;
-  }
-
-  const merged: TranscriptSegment[] = [];
-  let current: TranscriptSegment = {
-    ...segments[0],
-    words: segments[0].words ? [...segments[0].words] : []
-  };
-
-  for (let i = 1; i < segments.length; i++) {
-    const next = segments[i];
-    const sameSpeaker = current.speaker.trim().toLowerCase() === next.speaker.trim().toLowerCase();
-    const gapMs = next.startMs - current.endMs;
-
-    if (sameSpeaker && (gapMs <= maxGapMs || !current.text.trim())) {
-      const glue = current.text.trim() && next.text.trim() ? " " : "";
-      current.text = `${current.text.trim()}${glue}${next.text.trim()}`.trim();
-      current.endMs = Math.max(current.endMs, next.endMs);
-      if (next.words && next.words.length > 0) {
-        current.words = [...(current.words || []), ...next.words];
-      }
-    } else {
-      if (current.text.trim()) {
-        merged.push(current);
-      }
-      current = {
-        ...next,
-        words: next.words ? [...next.words] : []
-      };
-    }
-  }
-
-  if (current.text.trim()) {
-    merged.push(current);
-  }
-
-  return merged;
-}
+export { coalesceSpeakerSegments };

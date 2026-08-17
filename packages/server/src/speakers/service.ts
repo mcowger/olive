@@ -1,9 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Kysely } from "kysely";
-import type { Database, Speaker, SpeakerRow, Transcript } from "@olive/shared";
+import {
+  coalesceSpeakerSegments,
+  type Database,
+  type Speaker,
+  type SpeakerRow,
+  type Transcript,
+  type TranscriptSegment
+} from "@olive/shared";
 import { logger as defaultLogger, type Logger } from "../logger.ts";
 import { SpeechmaticsClient } from "../providers/speechmatics/client.ts";
 import type { SpeechmaticsJsonV2 } from "../providers/speechmatics/types.ts";
@@ -415,23 +422,29 @@ export class SpeakerService {
           updatedSegmentsCount++;
         }
       }
-      await writeFile(jsonPath, `${JSON.stringify(parsedData, null, 2)}\n`, "utf8");
+
+      const convertedSegments: TranscriptSegment[] = parsedData
+        .filter((item: any) => item.content && item.content.trim())
+        .map((item: any) => ({
+          speaker: item.speaker || "Speaker",
+          text: item.content,
+          startMs: item.start_time ?? 0,
+          endMs: item.end_time ?? 0
+        }));
+
+      const coalescedSegments = coalesceSpeakerSegments(convertedSegments, 15000);
+
+      const tmpJson = `${jsonPath}.tmp`;
+      await writeFile(tmpJson, `${JSON.stringify(parsedData, null, 2)}\n`, "utf8");
+      await rename(tmpJson, jsonPath);
 
       const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
-      const textLines = parsedData
-        .filter((item: any) => item.content && item.content.trim())
-        .map((item: any) => `${item.speaker || "Speaker"}: ${item.content}`);
-      await writeFile(txtPath, `${textLines.join("\n\n")}\n`, "utf8");
+      const tmpTxt = `${txtPath}.tmp`;
+      await writeFile(tmpTxt, `${transcriptToText({ segments: coalescedSegments })}\n`, "utf8");
+      await rename(tmpTxt, txtPath);
 
       updatedTranscript = {
-        segments: parsedData
-          .filter((item: any) => item.content && item.content.trim())
-          .map((item: any) => ({
-            speaker: item.speaker || "Speaker",
-            text: item.content,
-            startMs: item.start_time ?? 0,
-            endMs: item.end_time ?? 0
-          }))
+        segments: coalescedSegments
       };
     } else {
       // Canonical Transcript format
@@ -579,16 +592,23 @@ export class SpeakerService {
         }
       }
 
+      // Coalesce sequential segments from the same speaker into natural conversational turns
+      const coalescedSegments = coalesceSpeakerSegments(segments, 15000);
+
       updatedTranscript = {
-        segments,
+        segments: coalescedSegments,
         language: parsedData.language,
         durationMs: parsedData.durationMs
       };
 
-      await writeFile(jsonPath, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
+      const tmpJson = `${jsonPath}.tmp`;
+      await writeFile(tmpJson, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
+      await rename(tmpJson, jsonPath);
 
       const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
-      await writeFile(txtPath, `${transcriptToText(updatedTranscript)}\n`, "utf8");
+      const tmpTxt = `${txtPath}.tmp`;
+      await writeFile(tmpTxt, `${transcriptToText(updatedTranscript)}\n`, "utf8");
+      await rename(tmpTxt, txtPath);
     }
 
     // 5. Link target speaker in meeting_speakers
@@ -605,6 +625,51 @@ export class SpeakerService {
         })
       )
       .execute();
+
+    // 6. Clean up meeting_speakers links for speakers no longer in the transcript
+    if (updatedTranscript && updatedTranscript.segments.length > 0) {
+      const distinctSpeakerNames = new Set(
+        updatedTranscript.segments.map((s) => (s.speaker || "").trim().toLowerCase()).filter(Boolean)
+      );
+
+      const currentMeetingSpeakers = await this.db
+        .selectFrom("meeting_speakers")
+        .innerJoin("speakers", "speakers.id", "meeting_speakers.speaker_id")
+        .select([
+          "speakers.id",
+          "speakers.name",
+          "speakers.enrolled_at",
+          "speakers.enrollment_clip_paths"
+        ])
+        .where("meeting_speakers.meeting_id", "=", meetingId)
+        .execute();
+
+      for (const sp of currentMeetingSpeakers) {
+        if (!distinctSpeakerNames.has(sp.name.trim().toLowerCase())) {
+          await this.db
+            .deleteFrom("meeting_speakers")
+            .where("meeting_id", "=", meetingId)
+            .where("speaker_id", "=", sp.id)
+            .execute();
+
+          const otherMeetingLinks = await this.db
+            .selectFrom("meeting_speakers")
+            .selectAll()
+            .where("speaker_id", "=", sp.id)
+            .execute();
+
+          const isPlaceholder =
+            /^speaker\s*\d+$/i.test(sp.name.trim()) ||
+            /^s\d+$/i.test(sp.name.trim()) ||
+            sp.name.trim().toLowerCase() === normalizedFrom;
+
+          const clips = parseJsonField<string[]>(sp.enrollment_clip_paths, []);
+          if (otherMeetingLinks.length === 0 && (isPlaceholder || (clips.length === 0 && !sp.enrolled_at))) {
+            await this.db.deleteFrom("speakers").where("id", "=", sp.id).execute();
+          }
+        }
+      }
+    }
 
     return {
       speaker: toSpeaker(targetSpeakerRow),
@@ -1007,5 +1072,137 @@ export class SpeakerService {
   async deleteSpeaker(id: string): Promise<void> {
     await this.db.deleteFrom("meeting_speakers").where("speaker_id", "=", id).execute();
     await this.db.deleteFrom("speakers").where("id", "=", id).execute();
+  }
+
+  async syncMeetingSpeakersAndTranscripts(): Promise<{ repairedMeetings: number; prunedSpeakers: number }> {
+    if (!this.meetingsDir) {
+      return { repairedMeetings: 0, prunedSpeakers: 0 };
+    }
+
+    let repairedMeetings = 0;
+    let prunedSpeakers = 0;
+
+    const meetings = await this.db.selectFrom("meetings").selectAll().execute();
+    const allArtifacts = await this.db.selectFrom("artifacts").selectAll().where("kind", "=", "transcript").execute();
+
+    for (const meeting of meetings) {
+      const primaryTranscript = meeting.primary_transcript_artifact_id
+        ? allArtifacts.find((a) => a.id === meeting.primary_transcript_artifact_id)
+        : allArtifacts.find((a) => a.meeting_id === meeting.id && a.format === "json");
+
+      if (!primaryTranscript || primaryTranscript.format !== "json") continue;
+
+      const folder = meetingPaths(this.meetingsDir, meeting.start_time, meeting.title, meeting.id).folder;
+      const jsonPath = join(folder, primaryTranscript.path);
+      if (!existsSync(jsonPath)) continue;
+
+      try {
+        const raw = await readFile(jsonPath, "utf8");
+        const parsed = JSON.parse(raw);
+        let segments: TranscriptSegment[] = [];
+
+        if (Array.isArray(parsed.segments)) {
+          segments = parsed.segments;
+        } else if (Array.isArray(parsed)) {
+          segments = parsed
+            .filter((item: any) => item.content && item.content.trim())
+            .map((item: any) => ({
+              speaker: item.speaker || "Speaker",
+              text: item.content,
+              startMs: item.start_time ?? 0,
+              endMs: item.end_time ?? 0
+            }));
+        }
+
+        if (segments.length > 0) {
+          const coalesced = coalesceSpeakerSegments(segments, 15000);
+          const needsSave = JSON.stringify(coalesced) !== JSON.stringify(segments);
+
+          if (needsSave) {
+            const updated = Array.isArray(parsed.segments)
+              ? { ...parsed, segments: coalesced }
+              : coalesced;
+            const tmpJson = `${jsonPath}.tmp`;
+            await writeFile(tmpJson, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+            await rename(tmpJson, jsonPath);
+
+            const txtPath = join(folder, primaryTranscript.path.replace(/\.json$/, ".txt"));
+            const tmpTxt = `${txtPath}.tmp`;
+            await writeFile(tmpTxt, `${transcriptToText({ segments: coalesced })}\n`, "utf8");
+            await rename(tmpTxt, txtPath);
+            repairedMeetings++;
+          }
+
+          const distinctNames = new Set(
+            coalesced.map((s) => (s.speaker || "").trim().toLowerCase()).filter(Boolean)
+          );
+
+          // Get linked meeting speakers
+          const linked = await this.db
+            .selectFrom("meeting_speakers")
+            .innerJoin("speakers", "speakers.id", "meeting_speakers.speaker_id")
+            .select(["speakers.id", "speakers.name"])
+            .where("meeting_speakers.meeting_id", "=", meeting.id)
+            .execute();
+
+          for (const l of linked) {
+            if (!distinctNames.has(l.name.trim().toLowerCase())) {
+              await this.db
+                .deleteFrom("meeting_speakers")
+                .where("meeting_id", "=", meeting.id)
+                .where("speaker_id", "=", l.id)
+                .execute();
+            }
+          }
+
+          // Ensure speakers in distinctNames are linked
+          const allSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
+          for (const name of distinctNames) {
+            const matchedSpeaker = allSpeakers.find(
+              (s) => s.name.trim().toLowerCase() === name
+            );
+            if (matchedSpeaker) {
+              await this.db
+                .insertInto("meeting_speakers")
+                .values({
+                  meeting_id: meeting.id,
+                  speaker_id: matchedSpeaker.id,
+                  evidence_artifact_id: primaryTranscript.id
+                })
+                .onConflict((c) =>
+                  c.columns(["meeting_id", "speaker_id"]).doUpdateSet({
+                    evidence_artifact_id: primaryTranscript.id
+                  })
+                )
+                .execute();
+            }
+          }
+        }
+      } catch (err) {
+        this.logger.warn("Could not sync meeting transcript speakers", {
+          meetingId: meeting.id,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+
+    // Clean up orphaned placeholder speakers
+    const allSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
+    for (const s of allSpeakers) {
+      const isPlaceholder = /^speaker\s*\d+$/i.test(s.name.trim()) || /^s\d+$/i.test(s.name.trim());
+      const links = await this.db
+        .selectFrom("meeting_speakers")
+        .selectAll()
+        .where("speaker_id", "=", s.id)
+        .execute();
+
+      const clips = parseJsonField<string[]>(s.enrollment_clip_paths, []);
+      if (links.length === 0 && (isPlaceholder || (clips.length === 0 && !s.enrolled_at))) {
+        await this.db.deleteFrom("speakers").where("id", "=", s.id).execute();
+        prunedSpeakers++;
+      }
+    }
+
+    return { repairedMeetings, prunedSpeakers };
   }
 }

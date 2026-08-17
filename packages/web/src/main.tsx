@@ -845,15 +845,16 @@ function MeetingDetailView({
   if (detail?.transcriptContent) {
     try {
       const parsed = JSON.parse(detail.transcriptContent);
+      let raw: Array<{ speaker: string; text: string; startMs: number; endMs: number }> = [];
       if (Array.isArray(parsed.segments)) {
-        parsedTranscriptSegments = parsed.segments.map((s: any) => ({
+        raw = parsed.segments.map((s: any) => ({
           speaker: s.speaker || "Speaker",
           text: s.text || s.content || "",
           startMs: s.startMs ?? s.start_time ?? 0,
           endMs: s.endMs ?? s.end_time ?? 0
         }));
       } else if (Array.isArray(parsed)) {
-        parsedTranscriptSegments = parsed
+        raw = parsed
           .filter((item: any) => item.content && item.content.trim())
           .map((item: any) => ({
             speaker: item.speaker || "Speaker",
@@ -861,6 +862,24 @@ function MeetingDetailView({
             startMs: item.start_time ?? 0,
             endMs: item.end_time ?? 0
           }));
+      }
+
+      if (raw.length > 0) {
+        const merged: typeof raw = [];
+        let cur = { ...raw[0] };
+        for (let i = 1; i < raw.length; i++) {
+          const next = raw[i];
+          if (cur.speaker.trim().toLowerCase() === next.speaker.trim().toLowerCase()) {
+            const glue = cur.text.trim() && next.text.trim() ? " " : "";
+            cur.text = `${cur.text.trim()}${glue}${next.text.trim()}`.trim();
+            cur.endMs = Math.max(cur.endMs, next.endMs);
+          } else {
+            if (cur.text.trim()) merged.push(cur);
+            cur = { ...next };
+          }
+        }
+        if (cur.text.trim()) merged.push(cur);
+        parsedTranscriptSegments = merged;
       }
     } catch {
       // plain text fallback
@@ -1001,19 +1020,29 @@ function MeetingDetailView({
           )}
 
           {/* Speakers summary */}
-          {detail.speakers.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wider text-stone-400">Speakers:</span>
-              {detail.speakers.map((s) => (
-                <span
-                  key={s.id}
-                  className="rounded-full border border-stone-700 bg-stone-800/80 px-3 py-1 text-xs font-medium text-lime-300"
-                >
-                  {s.name}
-                </span>
-              ))}
-            </div>
-          )}
+          {(() => {
+            const activeSpeakerNames = new Set(
+              parsedTranscriptSegments.map((s) => s.speaker.trim().toLowerCase()).filter(Boolean)
+            );
+            const visibleSpeakers =
+              activeSpeakerNames.size > 0
+                ? detail.speakers.filter((s) => activeSpeakerNames.has(s.name.trim().toLowerCase()))
+                : detail.speakers;
+
+            return visibleSpeakers.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-stone-400">Speakers:</span>
+                {visibleSpeakers.map((s) => (
+                  <span
+                    key={s.id}
+                    className="rounded-full border border-stone-700 bg-stone-800/80 px-3 py-1 text-xs font-medium text-lime-300"
+                  >
+                    {s.name}
+                  </span>
+                ))}
+              </div>
+            ) : null;
+          })()}
 
           {/* Audio Player if recording exists */}
           {detail.recordings.length > 0 && (

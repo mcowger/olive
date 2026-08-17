@@ -271,4 +271,192 @@ describe("SpeakerService & Speaker Registry", () => {
     await rm(configDir, { recursive: true, force: true });
     await rm(meetingsDir, { recursive: true, force: true });
   });
+
+  test("coalesces sequential same-speaker turns and prunes placeholder speakers", async () => {
+    const handle = createDb(":memory:");
+    const configDir = await mkdtemp(join(import.meta.dir, "speaker-test-config-2-"));
+    const meetingsDir = await mkdtemp(join(import.meta.dir, "speaker-test-meetings-2-"));
+    const now = 1_700_000_000_000;
+
+    const meetingId = "m-coalesce-test";
+    const artifactId = "art-trans-1";
+    const placeholderSpeakerId1 = "sp-1";
+    const placeholderSpeakerId3 = "sp-3";
+    const speaker2Id = "sp-2";
+
+    await handle.db
+      .insertInto("meetings")
+      .values({
+        id: meetingId,
+        title: "Coalescing & Pruning Test",
+        start_time: now,
+        end_time: now + 60000,
+        source: "upload",
+        status: "ready",
+        tags: "[]",
+        primary_transcript_artifact_id: null,
+        created_at: now,
+        updated_at: now
+      })
+      .execute();
+
+    await handle.db
+      .insertInto("artifacts")
+      .values({
+        id: artifactId,
+        meeting_id: meetingId,
+        kind: "transcript",
+        provider: "local",
+        format: "json",
+        path: "transcripts/local.json",
+        created_at: now
+      })
+      .execute();
+
+    await handle.db
+      .updateTable("meetings")
+      .set({ primary_transcript_artifact_id: artifactId })
+      .where("id", "=", meetingId)
+      .execute();
+
+    await handle.db
+      .insertInto("speakers")
+      .values([
+        {
+          id: placeholderSpeakerId1,
+          name: "Speaker 1",
+          provider_ids: "{}",
+          enrolled_at: null,
+          enrollment_clip_paths: "[]",
+          created_at: now
+        },
+        {
+          id: placeholderSpeakerId3,
+          name: "Speaker 3",
+          provider_ids: "{}",
+          enrolled_at: null,
+          enrollment_clip_paths: "[]",
+          created_at: now
+        },
+        {
+          id: speaker2Id,
+          name: "Speaker 2",
+          provider_ids: "{}",
+          enrolled_at: null,
+          enrollment_clip_paths: "[]",
+          created_at: now
+        }
+      ])
+      .execute();
+
+    await handle.db
+      .insertInto("meeting_speakers")
+      .values([
+        { meeting_id: meetingId, speaker_id: placeholderSpeakerId1, evidence_artifact_id: artifactId },
+        { meeting_id: meetingId, speaker_id: placeholderSpeakerId3, evidence_artifact_id: artifactId },
+        { meeting_id: meetingId, speaker_id: speaker2Id, evidence_artifact_id: artifactId }
+      ])
+      .execute();
+
+    const paths = meetingPaths(meetingsDir, now, "Coalescing & Pruning Test", meetingId);
+    await mkdir(join(paths.folder, "transcripts"), { recursive: true });
+
+    // Initial transcript with Speaker 1, Speaker 2, and Speaker 3
+    const transcriptData = {
+      language: "en",
+      segments: [
+        { startMs: 0, endMs: 2000, speaker: "Speaker 1", text: "It's weird." },
+        { startMs: 3000, endMs: 4500, speaker: "Speaker 2", text: "strategic stuff." },
+        { startMs: 5000, endMs: 8000, speaker: "Speaker 1", text: "Is that a reasonable statement?" },
+        { startMs: 8500, endMs: 11000, speaker: "Speaker 3", text: "Okay, I got a weird strategic stuff for you." },
+        { startMs: 11500, endMs: 14000, speaker: "Speaker 1", text: "I was just talking to Colin." }
+      ]
+    };
+
+    await writeFile(join(paths.folder, "transcripts/local.json"), JSON.stringify(transcriptData, null, 2), "utf8");
+
+    const service = new SpeakerService({
+      db: handle.db,
+      configDir,
+      meetingsDir,
+      now: () => now + 100
+    });
+
+    const app = createApp({
+      db: handle.db,
+      configDir,
+      meetingsDir,
+      speakerService: service
+    });
+
+    // 1. Reassign Speaker 1 to "Matt Cowger"
+    const res1 = await app.request(`http://olive.test/api/meetings/${meetingId}/speakers/reassign`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        fromLabel: "Speaker 1",
+        toSpeakerName: "Matt Cowger",
+        adoptVoiceprint: false
+      })
+    });
+    if (res1.status !== 200) {
+      console.log("res1 error:", await res1.text());
+    }
+    expect(res1.status).toBe(200);
+
+    // 2. Reassign Speaker 3 to "Matt Cowger"
+    const res2 = await app.request(`http://olive.test/api/meetings/${meetingId}/speakers/reassign`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        fromLabel: "Speaker 3",
+        toSpeakerName: "Matt Cowger",
+        adoptVoiceprint: false
+      })
+    });
+    if (res2.status !== 200) {
+      console.log("res2 error:", await res2.text());
+    }
+    expect(res2.status).toBe(200);
+
+    // Verify transcript segments were coalesced:
+    // Segments 2, 3, 4 were all assigned to "Matt Cowger" and should now be 1 segment!
+    const updatedJson = JSON.parse(await readFile(join(paths.folder, "transcripts/local.json"), "utf8"));
+    expect(updatedJson.segments).toHaveLength(3);
+    expect(updatedJson.segments[0].speaker).toBe("Matt Cowger");
+    expect(updatedJson.segments[0].text).toBe("It's weird.");
+    expect(updatedJson.segments[1].speaker).toBe("Speaker 2");
+    expect(updatedJson.segments[1].text).toBe("strategic stuff.");
+    expect(updatedJson.segments[2].speaker).toBe("Matt Cowger");
+    expect(updatedJson.segments[2].text).toBe(
+      "Is that a reasonable statement? Okay, I got a weird strategic stuff for you. I was just talking to Colin."
+    );
+
+    // Verify Speaker 1 and Speaker 3 were pruned from meeting_speakers and deleted from speakers table
+    const meetingSpeakers = await handle.db.selectFrom("meeting_speakers").selectAll().where("meeting_id", "=", meetingId).execute();
+    expect(meetingSpeakers).toHaveLength(2); // Only Matt Cowger and Speaker 2
+
+    const remainingSpeakers = await service.listSpeakers();
+    const names = remainingSpeakers.map((s) => s.name);
+    expect(names).toContain("Matt Cowger");
+    expect(names).toContain("Speaker 2");
+    expect(names).not.toContain("Speaker 1");
+    expect(names).not.toContain("Speaker 3");
+
+    // Verify GET /api/meetings/:id returns only active speakers
+    const meetingRes = await app.request(`http://olive.test/api/meetings/${meetingId}`);
+    expect(meetingRes.status).toBe(200);
+    const meetingDetail = await meetingRes.json();
+    const detailSpeakerNames = meetingDetail.speakers.map((s: any) => s.name);
+    expect(detailSpeakerNames).toHaveLength(2);
+    expect(detailSpeakerNames).toContain("Matt Cowger");
+    expect(detailSpeakerNames).toContain("Speaker 2");
+    expect(detailSpeakerNames).not.toContain("Speaker 1");
+    expect(detailSpeakerNames).not.toContain("Speaker 3");
+
+    await handle.db.destroy();
+    handle.sqlite.close();
+    await rm(configDir, { recursive: true, force: true });
+    await rm(meetingsDir, { recursive: true, force: true });
+  });
 });

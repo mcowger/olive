@@ -7,6 +7,7 @@ export interface OlivePaths {
   backupsDir: string;
   databasePath: string;
   settingsPath: string;
+  plaudTokensPath: string;
 }
 
 function defaultConfigDir(platform: NodeJS.Platform, homeDir: string, env: NodeJS.ProcessEnv): string {
@@ -29,12 +30,14 @@ export function resolvePaths(
   const configDir = resolve(env.OLIVE_CONFIG_DIR || defaultConfigDir(platform, homeDir, env));
   const meetingsDir = resolve(env.OLIVE_MEETINGS_DIR || join(configDir, "meetings"));
   const backupsDir = resolve(env.OLIVE_BACKUPS_DIR || join(configDir, "backups"));
+  const plaudTokensPath = resolve(env.PLAUD_TOKEN_PATH || join(configDir, "plaud-tokens.json"));
 
   return {
     configDir,
     meetingsDir,
     backupsDir,
     databasePath: join(configDir, "olive.sqlite"),
-    settingsPath: join(configDir, "settings.json")
+    settingsPath: join(configDir, "settings.json"),
+    plaudTokensPath
   };
 }

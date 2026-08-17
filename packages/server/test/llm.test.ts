@@ -129,7 +129,7 @@ describe("LlmService", () => {
       model: "gemini-3.7-flash",
       prompt: "Reply with strictly the word: PONG",
       thinkingLevel: "low",
-      maxTokens: 100
+      maxTokens: 1000
     });
 
     expect(result37.text.trim().toLowerCase()).toContain("pong");

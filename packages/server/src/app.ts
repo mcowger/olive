@@ -147,7 +147,7 @@ export function createApp(options: AppOptions = {}): Hono {
     new PlaudPoller({
       db,
       meetingsDir,
-      client: options.plaudClient ?? createPlaudClient(),
+      client: options.plaudClient ?? createPlaudClient(paths),
       transcriptionService
     });
   const oauthManager = options.oauthManager ?? plaudPoller.oauth;

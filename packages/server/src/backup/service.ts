@@ -34,6 +34,7 @@ export interface BackupServiceOptions {
   backupsDir?: string;
   databasePath?: string;
   settingsPath?: string;
+  plaudTokensPath?: string;
   logger?: Logger;
 }
 
@@ -52,6 +53,7 @@ export class BackupService {
   private readonly backupsDir: string;
   private readonly databasePath: string;
   private readonly settingsPath: string;
+  private readonly plaudTokensPath: string;
   private readonly logger: Logger;
 
   constructor(options: BackupServiceOptions = {}) {
@@ -61,6 +63,7 @@ export class BackupService {
     this.backupsDir = options.backupsDir || resolved.backupsDir;
     this.databasePath = options.databasePath || resolved.databasePath;
     this.settingsPath = options.settingsPath || resolved.settingsPath;
+    this.plaudTokensPath = options.plaudTokensPath || resolved.plaudTokensPath;
     this.db = options.db || getDb();
     this.logger = options.logger || logger;
   }
@@ -209,9 +212,13 @@ export class BackupService {
         });
       }
 
-      // 3. Copy settings & custom model catalog
+      // 3. Copy settings, tokens & custom model catalog
       if (existsSync(this.settingsPath)) {
         cpSync(this.settingsPath, join(stagingDir, "settings.json"));
+      }
+
+      if (existsSync(this.plaudTokensPath)) {
+        cpSync(this.plaudTokensPath, join(stagingDir, "plaud-tokens.json"));
       }
 
       const modelsPath = join(this.configDir, "models.json");
@@ -457,6 +464,9 @@ export class BackupService {
           if (existsSync(this.settingsPath)) {
             cpSync(this.settingsPath, join(rollbackDir, "settings.json"));
           }
+          if (existsSync(this.plaudTokensPath)) {
+            cpSync(this.plaudTokensPath, join(rollbackDir, "plaud-tokens.json"));
+          }
         } catch (rbErr) {
           this.logger.warn("Could not create local rollback snapshot", {
             error: rbErr instanceof Error ? rbErr.message : String(rbErr)
@@ -493,10 +503,15 @@ export class BackupService {
       }
       cpSync(extractedDbPath, this.databasePath);
 
-      // 6. Restore settings.json and models.json if present
+      // 6. Restore settings.json, plaud-tokens.json and models.json if present
       const extractedSettings = join(extractDir, "settings.json");
       if (existsSync(extractedSettings)) {
         cpSync(extractedSettings, this.settingsPath);
+      }
+
+      const extractedPlaudTokens = join(extractDir, "plaud-tokens.json");
+      if (existsSync(extractedPlaudTokens)) {
+        cpSync(extractedPlaudTokens, this.plaudTokensPath);
       }
 
       const extractedModels = join(extractDir, "models.json");
@@ -579,6 +594,9 @@ export class BackupService {
           cpSync(join(rollbackDir, "olive.sqlite"), this.databasePath);
           if (existsSync(join(rollbackDir, "settings.json"))) {
             cpSync(join(rollbackDir, "settings.json"), this.settingsPath);
+          }
+          if (existsSync(join(rollbackDir, "plaud-tokens.json"))) {
+            cpSync(join(rollbackDir, "plaud-tokens.json"), this.plaudTokensPath);
           }
           await resetDbHandle(this.databasePath);
           clearAppConfigCache();

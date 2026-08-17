@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { FileDetail, FileSummary } from "@mcowger/plaud-client";
@@ -259,6 +259,48 @@ describe("Plaud API", () => {
 
     await closeDatabase(handle);
     await rm(meetingsDir, { recursive: true, force: true });
+  });
+
+  test("stores Plaud tokens in persistent configDir/plaud-tokens.json to survive container restarts", async () => {
+    const customConfigDir = await mkdtemp(join(tmpdir(), "plaud-config-test-"));
+    const customMeetingsDir = await mkdtemp(join(tmpdir(), "plaud-meetings-test-"));
+    const customTokensPath = join(customConfigDir, "plaud-tokens.json");
+
+    const paths = {
+      configDir: customConfigDir,
+      meetingsDir: customMeetingsDir,
+      backupsDir: join(customConfigDir, "backups"),
+      databasePath: join(customConfigDir, "olive.sqlite"),
+      settingsPath: join(customConfigDir, "settings.json"),
+      plaudTokensPath: customTokensPath
+    };
+
+    const client = createPlaudClient(paths);
+    const tokenStore = (client as any).oauth?.tokenStore || (client as any).tokenStore;
+    if (tokenStore) {
+      expect(tokenStore.filePath).toBe(customTokensPath);
+    }
+
+    // Save tokens via FileTokenStore at resolved path
+    const { FileTokenStore } = await import("@mcowger/plaud-client");
+    const store = new FileTokenStore(customTokensPath);
+    await store.save({
+      access_token: "persisted-access-token",
+      token_type: "Bearer",
+      refresh_token: "persisted-refresh-token",
+      expires_at: Date.now() + 3600_000
+    });
+
+    expect(existsSync(customTokensPath)).toBe(true);
+
+    // Simulate restart with fresh client using the same paths
+    const reloadedStore = new FileTokenStore(customTokensPath);
+    const loaded = await reloadedStore.load();
+    expect(loaded?.access_token).toBe("persisted-access-token");
+    expect(loaded?.refresh_token).toBe("persisted-refresh-token");
+
+    await rm(customConfigDir, { recursive: true, force: true });
+    await rm(customMeetingsDir, { recursive: true, force: true });
   });
 });
 

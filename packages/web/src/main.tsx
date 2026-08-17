@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
+import React, { Fragment, StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ReactElement } from "react";
 import { marked } from "marked";
@@ -782,6 +782,8 @@ function MeetingDetailView({
   const [summaryViewMode, setSummaryViewMode] = useState<"rendered" | "raw">("rendered");
   const [regenerating, setRegenerating] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
+  const playbackStopMsRef = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const fetchDetail = async () => {
@@ -1065,6 +1067,22 @@ function MeetingDetailView({
     } catch (err) {
       alert(`Failed to merge segments: ${err instanceof Error ? err.message : String(err)}`);
     }
+  };
+
+  const handlePlaySegment = (seg: { startMs: number; endMs: number }, idx: number) => {
+    if (!audioRef.current) return;
+
+    if (playingSegmentIndex === idx && !audioRef.current.paused) {
+      audioRef.current.pause();
+      setPlayingSegmentIndex(null);
+      playbackStopMsRef.current = null;
+      return;
+    }
+
+    audioRef.current.currentTime = seg.startMs / 1000;
+    playbackStopMsRef.current = seg.endMs;
+    setPlayingSegmentIndex(idx);
+    void audioRef.current.play();
   };
 
   let parsedTranscriptSegments: Array<{
@@ -1378,11 +1396,16 @@ function MeetingDetailView({
 
           {/* Audio Player if recording exists */}
           {detail.recordings.length > 0 && (
-            <section className="rounded-xl border border-stone-800 bg-stone-900/80 p-4 space-y-3">
+            <section className="sticky top-2 z-40 rounded-xl border border-stone-800 bg-stone-900/95 backdrop-blur p-3.5 space-y-2.5 shadow-2xl">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-400">
                 <div className="flex items-center gap-3">
                   <span className="font-semibold uppercase tracking-wider text-stone-300">Recording Audio</span>
                   <span>{detail.recordings[0].mime} • {(detail.recordings[0].sizeBytes / 1024 / 1024).toFixed(2)} MB</span>
+                  {playingSegmentIndex !== null && (
+                    <span className="inline-flex items-center gap-1.5 rounded bg-lime-500/20 px-2 py-0.5 text-[11px] font-semibold text-lime-300 border border-lime-500/40 animate-pulse">
+                      <span>▶ Playing turn #{playingSegmentIndex + 1}</span>
+                    </span>
+                  )}
                 </div>
 
                 {/* Voice Clarity Enhancement Toggle */}
@@ -1414,6 +1437,23 @@ function MeetingDetailView({
                 controls
                 src={`/api/meetings/${meetingId}/audio?enhanced=${enhancedAudio}`}
                 className="w-full h-10 rounded"
+                onTimeUpdate={() => {
+                  if (audioRef.current && playbackStopMsRef.current !== null) {
+                    if (audioRef.current.currentTime >= playbackStopMsRef.current / 1000) {
+                      audioRef.current.pause();
+                      playbackStopMsRef.current = null;
+                      setPlayingSegmentIndex(null);
+                    }
+                  }
+                }}
+                onPause={() => {
+                  setPlayingSegmentIndex(null);
+                  playbackStopMsRef.current = null;
+                }}
+                onEnded={() => {
+                  setPlayingSegmentIndex(null);
+                  playbackStopMsRef.current = null;
+                }}
               />
             </section>
           )}
@@ -1574,16 +1614,16 @@ function MeetingDetailView({
                   <div key={idx} className="group flex gap-4 rounded-lg p-2 transition hover:bg-stone-800/30">
                     <button
                       type="button"
-                      onClick={() => {
-                        if (audioRef.current) {
-                          audioRef.current.currentTime = seg.startMs / 1000;
-                          void audioRef.current.play();
-                        }
-                      }}
-                      title="Click to play audio from this timestamp"
-                      className="w-16 shrink-0 pt-0.5 text-xs text-stone-500 hover:text-lime-400 font-mono transition text-left cursor-pointer"
+                      onClick={() => handlePlaySegment(seg, idx)}
+                      title={playingSegmentIndex === idx ? "Pause playback" : "Play only this turn"}
+                      className={`w-20 shrink-0 pt-0.5 text-xs font-mono transition text-left cursor-pointer flex items-center gap-1 ${
+                        playingSegmentIndex === idx
+                          ? "text-lime-300 font-bold"
+                          : "text-stone-500 hover:text-lime-400"
+                      }`}
                     >
-                      ▶ {formatTimeOffset(seg.startMs)}
+                      <span>{playingSegmentIndex === idx ? "⏸" : "▶"}</span>
+                      <span>{formatTimeOffset(seg.startMs)}</span>
                     </button>
                     <div className="flex-1 space-y-1">
                       <div className="flex items-center gap-2">
@@ -2288,7 +2328,7 @@ function SplitSegmentModal({
                 const isPart1 = idx < splitWordIndex;
                 const isSplitTarget = idx === splitWordIndex;
                 return (
-                  <React.Fragment key={idx}>
+                  <Fragment key={idx}>
                     {isSplitTarget && (
                       <span className="inline-flex items-center gap-1 rounded bg-amber-400 px-1.5 py-0.5 text-[11px] font-bold text-stone-950 shadow-md animate-pulse">
                         ✂ Split Point
@@ -2306,7 +2346,7 @@ function SplitSegmentModal({
                     >
                       {word}
                     </button>
-                  </React.Fragment>
+                  </Fragment>
                 );
               })}
             </div>

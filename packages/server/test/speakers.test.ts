@@ -8,8 +8,9 @@ import { meetingPaths } from "../src/layout.ts";
 import { SpeechmaticsClient } from "../src/providers/speechmatics/client.ts";
 import type { SpeechmaticsJsonV2 } from "../src/providers/speechmatics/types.ts";
 import { SpeakerService } from "../src/speakers/service.ts";
+import { encodeWav } from "../src/providers/local/wav.ts";
 
-const AUDIO_BYTES = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+const AUDIO_BYTES = encodeWav(new Float32Array(16000 * 4));
 
 const ENROLL_JSON_V2: SpeechmaticsJsonV2 = {
   format: "2.0",

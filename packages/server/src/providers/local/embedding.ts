@@ -1,4 +1,5 @@
 import type { VoiceprintVector } from "./types.ts";
+import { ensureSherpaModels, getSherpaOnnx } from "./sherpa-runtime.ts";
 
 /**
  * Computes the Euclidean norm (L2 norm) of a vector.
@@ -58,10 +59,32 @@ export function cosineSimilarity(
 }
 
 /**
+ * Scores a query vector against an array of trusted speaker vectors.
+ * Returns the maximum cosine similarity (or 0 if no vectors).
+ */
+export function scoreAgainstTrustedVectors(
+  query: number[] | Float32Array | null | undefined,
+  trustedVectors: VoiceprintVector[]
+): number {
+  if (!query || !trustedVectors || trustedVectors.length === 0) {
+    return 0;
+  }
+
+  let maxSim = -1.0;
+  for (const vec of trustedVectors) {
+    const sim = cosineSimilarity(query, vec);
+    if (sim > maxSim) {
+      maxSim = sim;
+    }
+  }
+
+  return Math.max(-1.0, maxSim);
+}
+
+/**
  * Updates an existing speaker voiceprint centroid with a new embedding sample
- * using an Exponential Moving Average (EMA) and L2 normalization:
- *
- * centroid_new = normalize( alpha * centroid_old + (1 - alpha) * new_sample )
+ * using an Exponential Moving Average (EMA) and L2 normalization.
+ * Note: Automatic inference must not mutate enrolled profiles; this is kept for utility only.
  */
 export function updateVoiceprintCentroid(
   existingCentroid: VoiceprintVector,
@@ -110,7 +133,35 @@ export function mergeVoiceprintVectors(vectors: VoiceprintVector[]): VoiceprintV
 }
 
 /**
- * Speaker embedding extraction engine.
+ * Computes a weighted centroid from multiple voiceprint vectors (e.g. weighted by segment duration)
+ * and normalizes the resulting vector to unit length.
+ */
+export function mergeWeightedVoiceprintVectors(
+  entries: Array<{ vector: VoiceprintVector; weight: number }>
+): VoiceprintVector {
+  const valid = entries.filter((e) => e.vector && e.vector.length > 0 && e.weight > 0);
+  if (valid.length === 0) {
+    return [];
+  }
+  if (valid.length === 1) {
+    return normalizeVector(valid[0].vector);
+  }
+
+  const dim = valid[0].vector.length;
+  const sum = new Array<number>(dim).fill(0);
+
+  for (const { vector, weight } of valid) {
+    const len = Math.min(dim, vector.length);
+    for (let i = 0; i < len; i++) {
+      sum[i] += vector[i] * weight;
+    }
+  }
+
+  return normalizeVector(sum);
+}
+
+/**
+ * Speaker embedding extraction engine interface.
  * Computes fixed-dimensional voiceprint embeddings from 16kHz mono audio.
  */
 export interface SpeakerEmbeddingExtractorInterface {
@@ -119,126 +170,81 @@ export interface SpeakerEmbeddingExtractorInterface {
 }
 
 /**
- * Standard acoustic filterbank & cepstral voiceprint extractor with
- * Cepstral Mean Normalization (CMN).
- * Computes 32 Mel-frequency filterbank energies, variance, and DCT cepstral
- * coefficients across speech frames to generate a normalized 192-dimensional voiceprint.
+ * Deep learning-based neural speaker embedding extractor using Sherpa-ONNX
+ * (e.g. 3D-Speaker ERes2Net, WeSpeaker, or NeMo TitaNet).
  */
-export class AcousticFeatureEmbeddingExtractor implements SpeakerEmbeddingExtractorInterface {
-  readonly dim: number;
+export class SherpaSpeakerEmbeddingExtractor implements SpeakerEmbeddingExtractorInterface {
+  private extractorInstance: any = null;
+  private initPromise: Promise<void> | null = null;
+  private modelPath: string | null = null;
+  private _dim = 512;
+  private readonly numThreads: number;
 
-  constructor(dim = 192) {
-    this.dim = dim;
+  constructor(options: { modelPath?: string; numThreads?: number } | number = {}) {
+    if (typeof options === "number") {
+      this.modelPath = null;
+      this.numThreads = 2;
+      this._dim = options;
+    } else {
+      this.modelPath = options.modelPath ?? null;
+      this.numThreads = options.numThreads ?? 2;
+    }
+  }
+
+  get dim(): number {
+    return this._dim;
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    if (this.extractorInstance) return;
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      const sherpa = await getSherpaOnnx();
+      let model = this.modelPath;
+      if (!model) {
+        const paths = await ensureSherpaModels();
+        model = paths.embeddingModelPath;
+        this.modelPath = model;
+      }
+
+      this.extractorInstance = new sherpa.SpeakerEmbeddingExtractor({
+        model,
+        numThreads: this.numThreads,
+        debug: false
+      });
+
+      this._dim = this.extractorInstance.dim ?? 512;
+    })();
+
+    await this.initPromise;
   }
 
   async extract(samples: Float32Array, sampleRate = 16000): Promise<VoiceprintVector> {
     if (samples.length === 0) {
-      return new Array(this.dim).fill(0);
+      return new Array(this._dim).fill(0);
     }
 
-    const frameSize = Math.floor(sampleRate * 0.025); // 25ms frame
-    const frameHop = Math.floor(sampleRate * 0.010);  // 10ms hop
-    const numFrames = Math.floor((samples.length - frameSize) / frameHop);
+    await this.ensureInitialized();
 
-    if (numFrames <= 0) {
-      return this.fallbackVector(samples);
-    }
+    try {
+      const stream = this.extractorInstance.createStream();
+      stream.acceptWaveform({ sampleRate, samples });
+      stream.inputFinished();
 
-    const numFilters = 32;
-    const filterEnergies: number[][] = Array.from({ length: numFilters }, () => []);
-
-    // 32 Mel filter center frequencies from 100Hz to 7500Hz
-    const minFreq = 100;
-    const maxFreq = Math.min(sampleRate / 2, 7500);
-    const minMel = 2595 * Math.log10(1 + minFreq / 700);
-    const maxMel = 2595 * Math.log10(1 + maxFreq / 700);
-    const melStep = (maxMel - minMel) / (numFilters + 1);
-
-    const centerFreqs = new Float32Array(numFilters);
-    for (let i = 0; i < numFilters; i++) {
-      const mel = minMel + (i + 1) * melStep;
-      centerFreqs[i] = 700 * (Math.pow(10, mel / 2595) - 1);
-    }
-
-    // Precomputed trigonometric tables
-    const cosTable = Array.from({ length: numFilters }, (_, k) => {
-      const w = (2 * Math.PI * centerFreqs[k]) / sampleRate;
-      return new Float32Array(frameSize).map((_, i) => Math.cos(w * i));
-    });
-    const sinTable = Array.from({ length: numFilters }, (_, k) => {
-      const w = (2 * Math.PI * centerFreqs[k]) / sampleRate;
-      return new Float32Array(frameSize).map((_, i) => Math.sin(w * i));
-    });
-
-    // Hann window
-    const window = new Float32Array(frameSize);
-    for (let i = 0; i < frameSize; i++) {
-      window[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (frameSize - 1)));
-    }
-
-    for (let f = 0; f < numFrames; f++) {
-      const start = f * frameHop;
-      for (let k = 0; k < numFilters; k++) {
-        let real = 0;
-        let imag = 0;
-        const cosT = cosTable[k];
-        const sinT = sinTable[k];
-        for (let i = 0; i < frameSize; i++) {
-          const val = samples[start + i] * window[i];
-          real += val * cosT[i];
-          imag += val * sinT[i];
-        }
-        const power = real * real + imag * imag;
-        filterEnergies[k].push(Math.log(1e-6 + power));
+      if (this.extractorInstance.isReady(stream)) {
+        const rawEmb = this.extractorInstance.compute(stream);
+        return normalizeVector(rawEmb);
       }
+
+      return new Array(this._dim).fill(0);
+    } catch {
+      return new Array(this._dim).fill(0);
     }
-
-    // Filter means
-    const filterMeans = new Float32Array(numFilters);
-    let globalMean = 0;
-    for (let k = 0; k < numFilters; k++) {
-      let mean = 0;
-      for (const v of filterEnergies[k]) mean += v;
-      mean /= filterEnergies[k].length;
-      filterMeans[k] = mean;
-      globalMean += mean;
-    }
-    globalMean /= numFilters;
-
-    // Cepstral Mean Normalization (CMN)
-    const normalizedMeans = new Float32Array(numFilters);
-    for (let k = 0; k < numFilters; k++) {
-      normalizedMeans[k] = filterMeans[k] - globalMean;
-    }
-
-    const embedding = new Array<number>(this.dim).fill(0);
-    for (let k = 0; k < numFilters; k++) {
-      embedding[k] = normalizedMeans[k];
-
-      let variance = 0;
-      for (const v of filterEnergies[k]) {
-        variance += (v - filterMeans[k]) * (v - filterMeans[k]);
-      }
-      embedding[k + numFilters] = Math.sqrt(variance / filterEnergies[k].length);
-    }
-
-    // Discrete Cosine Transform (DCT) coefficients (n = 1..32)
-    for (let n = 1; n <= numFilters; n++) {
-      let cepstrum = 0;
-      for (let k = 0; k < numFilters; k++) {
-        cepstrum += normalizedMeans[k] * Math.cos((Math.PI * n * (k + 0.5)) / numFilters);
-      }
-      embedding[n - 1 + numFilters * 2] = cepstrum;
-    }
-
-    return normalizeVector(embedding);
-  }
-
-  private fallbackVector(samples: Float32Array): VoiceprintVector {
-    const vec = new Array<number>(this.dim).fill(0);
-    for (let i = 0; i < samples.length; i++) {
-      vec[i % this.dim] += samples[i];
-    }
-    return normalizeVector(vec);
   }
 }
+
+/**
+ * Default alias for speaker embedding extractor.
+ */
+export { SherpaSpeakerEmbeddingExtractor as AcousticFeatureEmbeddingExtractor };

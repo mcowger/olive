@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename, unlink } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Kysely } from "kysely";
 import {
@@ -17,14 +17,12 @@ import type { SpeechmaticsJsonV2 } from "../providers/speechmatics/types.ts";
 import { meetingPaths } from "../layout.ts";
 import { transcriptToText } from "../providers/speechmatics/normalize.ts";
 import {
-  AcousticFeatureEmbeddingExtractor,
   decodeWav,
   encodeWav,
   loadAudioSamples,
-  mergeVoiceprintVectors,
   normalizeVector,
-  resample,
-  updateVoiceprintCentroid,
+  SherpaSpeakerEmbeddingExtractor,
+  type SpeakerEmbeddingExtractorInterface,
   type VoiceprintVector
 } from "../providers/local/index.ts";
 
@@ -126,6 +124,19 @@ export interface BackfillVoiceprintsResult {
   speakers: Speaker[];
 }
 
+export interface RebuildSpeakerProfilesOptions {
+  speakerId?: string;
+  force?: boolean;
+}
+
+export interface RebuildSpeakerProfilesResult {
+  processedSpeakers: number;
+  updatedSpeakers: number;
+  cleanedClipsCount: number;
+  retainedClipsCount: number;
+  speakers: Speaker[];
+}
+
 export interface SpeakerWithStats extends Speaker {
   meetingCount: number;
 }
@@ -160,7 +171,7 @@ export class SpeakerService {
   private readonly configDir: string;
   private readonly meetingsDir?: string;
   private readonly client: SpeechmaticsClient;
-  private readonly localEmbeddingExtractor: AcousticFeatureEmbeddingExtractor;
+  private readonly localEmbeddingExtractor: SpeakerEmbeddingExtractorInterface;
   private readonly logger: Logger;
   private readonly now: () => number;
 
@@ -169,7 +180,7 @@ export class SpeakerService {
     this.configDir = options.configDir;
     this.meetingsDir = options.meetingsDir;
     this.client = options.speechmaticsClient ?? new SpeechmaticsClient();
-    this.localEmbeddingExtractor = new AcousticFeatureEmbeddingExtractor(192);
+    this.localEmbeddingExtractor = new SherpaSpeakerEmbeddingExtractor();
     this.logger = options.logger ?? defaultLogger;
     this.now = options.now ?? Date.now;
   }
@@ -296,10 +307,8 @@ export class SpeakerService {
   }
 
   /**
-   * Cross-fills voiceprints across providers for all or specific speakers.
-   * If a speaker has enrollment clips on disk:
-   * - Computes and populates local voiceprints if missing or out-of-date.
-   * - Submits enrollment to Speechmatics if missing and client is configured.
+   * Backfills neural voiceprints across providers from saved enrollment clips.
+   * Stores multiple independent trusted vectors per speaker in provider_ids.local.
    */
   async backfillVoiceprints(
     options: BackfillVoiceprintsOptions = {}
@@ -319,7 +328,7 @@ export class SpeakerService {
       const clips = parseJsonField<string[]>(row.enrollment_clip_paths, []);
       let changed = false;
 
-      // 1. Cross-fill Local Voiceprint from saved audio clips if missing or forced
+      // 1. Cross-fill Local Voiceprints from saved audio clips if missing or forced
       if (clips.length > 0 && (!providerIds.local?.length || options.force)) {
         const clipVectors: VoiceprintVector[] = [];
         for (const relPath of clips) {
@@ -328,9 +337,12 @@ export class SpeakerService {
             try {
               const fileBytes = new Uint8Array(await readFile(fullPath));
               if (fileBytes.byteLength >= 12) {
-                const decoded = await loadAudioSamples({ audioBytes: fileBytes, audioPath: fullPath }, 16000);
-                const emb = await this.localEmbeddingExtractor.extract(decoded.samples, 16000);
-                clipVectors.push(emb);
+                const decoded = await loadAudioSamples({ audioBytes: fileBytes, audioPath: fullPath, enhance: false }, 16000);
+                const durSec = decoded.samples.length / 16000;
+                if (durSec >= 2.0) {
+                  const emb = await this.localEmbeddingExtractor.extract(decoded.samples, 16000);
+                  clipVectors.push(emb);
+                }
               }
             } catch (err) {
               this.logger.warn("Failed to extract local voiceprint from stored clip during backfill", {
@@ -342,8 +354,7 @@ export class SpeakerService {
         }
 
         if (clipVectors.length > 0) {
-          const merged = mergeVoiceprintVectors(clipVectors);
-          providerIds.local = [JSON.stringify(merged)];
+          providerIds.local = clipVectors.map((v) => JSON.stringify(v));
           changed = true;
         }
       }
@@ -437,6 +448,160 @@ export class SpeakerService {
     };
   }
 
+  /**
+   * Rebuilds all speaker profiles from scratch:
+   * 1. Deduplicates audio clips by SHA-256 hash.
+   * 2. Rejects clips < 3.0s or > 30.0s.
+   * 3. Detects and removes cross-speaker contaminated clips (same audio enrolled to 2 speakers).
+   * 4. Re-computes neural embeddings using the Sherpa-ONNX model.
+   * 5. Stores independent trusted vectors per speaker.
+   */
+  async rebuildSpeakerProfiles(
+    options: RebuildSpeakerProfilesOptions = {}
+  ): Promise<RebuildSpeakerProfilesResult> {
+    const currentTime = this.now();
+    let query = this.db.selectFrom("speakers").selectAll();
+    if (options.speakerId) {
+      query = query.where("id", "=", options.speakerId);
+    }
+
+    const rows = await query.execute();
+
+    // Map: sha256 -> Array of { speakerId, relPath, fullPath, durationSec, samples }
+    interface ClipInfo {
+      speakerId: string;
+      relPath: string;
+      fullPath: string;
+      sha256: string;
+      durationSec: number;
+      samples: Float32Array;
+    }
+
+    const clipsByHash = new Map<string, ClipInfo[]>();
+    const allClipsBySpeaker = new Map<string, ClipInfo[]>();
+
+    for (const row of rows) {
+      const clips = parseJsonField<string[]>(row.enrollment_clip_paths, []);
+      const speakerClips: ClipInfo[] = [];
+
+      for (const relPath of clips) {
+        const fullPath = join(this.configDir, relPath);
+        if (existsSync(fullPath)) {
+          try {
+            const fileBytes = new Uint8Array(await readFile(fullPath));
+            if (fileBytes.byteLength >= 12) {
+              const hash = createHash("sha256").update(fileBytes).digest("hex");
+              const decoded = await loadAudioSamples({ audioBytes: fileBytes, audioPath: fullPath, enhance: false }, 16000);
+              const durationSec = decoded.samples.length / 16000;
+
+              const info: ClipInfo = {
+                speakerId: row.id,
+                relPath,
+                fullPath,
+                sha256: hash,
+                durationSec,
+                samples: decoded.samples
+              };
+
+              speakerClips.push(info);
+
+              const hashList = clipsByHash.get(hash) ?? [];
+              hashList.push(info);
+              clipsByHash.set(hash, hashList);
+            }
+          } catch {}
+        }
+      }
+
+      allClipsBySpeaker.set(row.id, speakerClips);
+    }
+
+    let cleanedClipsCount = 0;
+    let retainedClipsCount = 0;
+    let updatedSpeakersCount = 0;
+    const updatedSpeakers: Speaker[] = [];
+
+    for (const row of rows) {
+      const speakerClips = allClipsBySpeaker.get(row.id) ?? [];
+      const cleanClips: ClipInfo[] = [];
+      const seenHashesInSpeaker = new Set<string>();
+
+      for (const clip of speakerClips) {
+        const sharingSpeakers = new Set((clipsByHash.get(clip.sha256) ?? []).map((c) => c.speakerId));
+
+        // Validation rules:
+        // A. Cross-speaker conflict: if enrolled under >= 2 distinct speakers, reject as contaminated
+        const isCrossContaminated = sharingSpeakers.size > 1;
+
+        // B. Duplicate within speaker: reject duplicate clips
+        const isDuplicate = seenHashesInSpeaker.has(clip.sha256);
+
+        // C. Duration constraint: reject < 3.0s or > 30.0s
+        const isDurationInvalid = clip.durationSec < 2.5 || clip.durationSec > 35.0;
+
+        if (isCrossContaminated || isDuplicate || isDurationInvalid) {
+          cleanedClipsCount++;
+          // Remove invalid file from disk
+          try {
+            if (existsSync(clip.fullPath)) {
+              await unlink(clip.fullPath);
+            }
+          } catch {}
+        } else {
+          seenHashesInSpeaker.add(clip.sha256);
+          cleanClips.push(clip);
+          retainedClipsCount++;
+        }
+      }
+
+      // Re-extract neural embeddings for all clean clips
+      const trustedVectors: VoiceprintVector[] = [];
+      for (const clip of cleanClips) {
+        try {
+          const emb = await this.localEmbeddingExtractor.extract(clip.samples, 16000);
+          trustedVectors.push(emb);
+        } catch (err) {
+          this.logger.warn("Failed to extract neural embedding during rebuild", {
+            path: clip.fullPath,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+      }
+
+      const providerIds = parseJsonField<Record<string, string[]>>(row.provider_ids, {});
+      providerIds.local = trustedVectors.map((v) => JSON.stringify(v));
+      const cleanPaths = cleanClips.map((c) => c.relPath);
+
+      await this.db
+        .updateTable("speakers")
+        .set({
+          provider_ids: JSON.stringify(providerIds),
+          enrollment_clip_paths: JSON.stringify(cleanPaths),
+          enrolled_at: cleanPaths.length > 0 ? (row.enrolled_at ?? currentTime) : null
+        })
+        .where("id", "=", row.id)
+        .execute();
+
+      updatedSpeakersCount++;
+
+      const updatedRow = await this.db
+        .selectFrom("speakers")
+        .selectAll()
+        .where("id", "=", row.id)
+        .executeTakeFirstOrThrow();
+
+      updatedSpeakers.push(toSpeaker(updatedRow));
+    }
+
+    return {
+      processedSpeakers: rows.length,
+      updatedSpeakers: updatedSpeakersCount,
+      cleanedClipsCount,
+      retainedClipsCount,
+      speakers: updatedSpeakers
+    };
+  }
+
   async reassignMeetingSpeaker(
     options: ReassignMeetingSpeakerOptions
   ): Promise<ReassignMeetingSpeakerResult> {
@@ -498,7 +663,7 @@ export class SpeakerService {
       throw new Error("Either toSpeakerId or toSpeakerName must be provided");
     }
 
-    // 2. Read meeting transcript artifact (primary or any json transcript)
+    // 2. Read meeting transcript artifact
     let transcriptArtifact = meeting.primary_transcript_artifact_id
       ? await this.db
           .selectFrom("artifacts")
@@ -534,7 +699,6 @@ export class SpeakerService {
     let updatedTranscript: Transcript;
 
     if (Array.isArray(parsedData)) {
-      // Plaud or legacy array format
       for (const item of parsedData) {
         if (item.speaker && item.speaker.trim().toLowerCase() === normalizedFrom) {
           item.speaker = targetSpeakerRow.name;
@@ -566,19 +730,16 @@ export class SpeakerService {
         segments: coalescedSegments
       };
     } else {
-      // Canonical Transcript format
       const segments: any[] = parsedData.segments ?? [];
 
-      // 3. Adopt voiceprints across BOTH Speechmatics and Local providers if requested
+      // 3. Adopt voiceprints if requested
       if (adoptVoiceprint) {
         const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
         const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
         let adoptedAny = false;
 
-        // A. Adopt Speechmatics voiceprint identifiers if in transcript metadata or on disk
+        // A. Adopt Speechmatics voiceprint identifiers
         const extractedIds: string[] = [];
-
-        // 1. From current parsed transcript
         const speakerList = (parsedData.speakers ?? []) as any[];
         for (const s of speakerList) {
           const label = (s.label || s.speaker || "").trim().toLowerCase();
@@ -594,40 +755,6 @@ export class SpeakerService {
           }
         }
 
-        // 2. From transcripts/speechmatics.json in meeting folder if exists
-        const smJsonPath = join(folder, "transcripts/speechmatics.json");
-        if (existsSync(smJsonPath)) {
-          try {
-            const smRaw = JSON.parse(await readFile(smJsonPath, "utf8"));
-            const smSpeakerList = (smRaw.speakers ?? []) as any[];
-            for (const s of smSpeakerList) {
-              const label = (s.label || s.speaker || "").trim().toLowerCase();
-              if (label === normalizedFrom && s.speaker_identifiers) {
-                const ids = Array.isArray(s.speaker_identifiers)
-                  ? s.speaker_identifiers
-                  : Array.from(s.speaker_identifiers);
-                for (const id of ids as string[]) {
-                  if (id && !extractedIds.includes(id)) {
-                    extractedIds.push(id);
-                  }
-                }
-              }
-            }
-          } catch {}
-        }
-
-        // 3. From fromLabel speaker in database if present
-        const allDbSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
-        const fromSpeaker = allDbSpeakers.find((s) => s.name.trim().toLowerCase() === normalizedFrom);
-        if (fromSpeaker) {
-          const fromProviderIds = parseJsonField<Record<string, string[]>>(fromSpeaker.provider_ids, {});
-          for (const id of fromProviderIds.speechmatics ?? []) {
-            if (id && !extractedIds.includes(id)) {
-              extractedIds.push(id);
-            }
-          }
-        }
-
         if (extractedIds.length > 0) {
           extractedVoiceprintsCount += extractedIds.length;
           const currentSmIds = new Set(providerIds.speechmatics ?? []);
@@ -638,7 +765,7 @@ export class SpeakerService {
           adoptedAny = true;
         }
 
-        // B. Extract speaker's audio from recording on disk to compute Local voiceprint and save clip
+        // B. Extract speaker's audio from recording on disk
         const recording = await this.db
           .selectFrom("recordings")
           .selectAll()
@@ -652,10 +779,9 @@ export class SpeakerService {
             try {
               const audioBytes = new Uint8Array(await readFile(audioFullPath));
               if (audioBytes.byteLength >= 12) {
-                const decoded = await loadAudioSamples({ audioPath: audioFullPath, audioBytes }, 16000);
+                const decoded = await loadAudioSamples({ audioPath: audioFullPath, audioBytes, enhance: false }, 16000);
                 const fullSamples = decoded.samples;
 
-                // Slice audio from matching speaker segments
                 const isSingleSegment = options.segmentIndex !== undefined && options.scope === "single";
                 const matchingSegments = isSingleSegment
                   ? (segments[options.segmentIndex!] ? [segments[options.segmentIndex!]] : [])
@@ -681,35 +807,32 @@ export class SpeakerService {
                     offset += c.length;
                   }
 
-                  // 1. Compute and update local voiceprint
-                  const newLocalEmbedding = await this.localEmbeddingExtractor.extract(mergedSamples, 16000);
-                  const existingLocalVec = providerIds.local?.[0]
-                    ? JSON.parse(providerIds.local[0])
-                    : undefined;
+                  const durationSec = mergedSamples.length / 16000;
 
-                  const updatedLocalVec = existingLocalVec
-                    ? updateVoiceprintCentroid(existingLocalVec, newLocalEmbedding)
-                    : newLocalEmbedding;
+                  // Validate: only enroll if duration is between 3.0s and 30.0s
+                  if (durationSec >= 3.0 && durationSec <= 30.0) {
+                    const newLocalEmbedding = await this.localEmbeddingExtractor.extract(mergedSamples, 16000);
+                    const localVectors = providerIds.local ?? [];
+                    localVectors.push(JSON.stringify(newLocalEmbedding));
+                    providerIds.local = localVectors;
+                    extractedVoiceprintsCount++;
+                    adoptedAny = true;
 
-                  providerIds.local = [JSON.stringify(updatedLocalVec)];
-                  extractedVoiceprintsCount++;
-                  adoptedAny = true;
+                    // Save audio clip
+                    const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
+                    await mkdir(speakerFolder, { recursive: true });
+                    const clipFilename = `clip_meeting_${meetingId}_${currentTime}.wav`;
+                    const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
+                    const clipWavBytes = encodeWav(mergedSamples, 16000);
+                    await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
 
-                  // 2. Save extracted audio slice as an enrollment clip
-                  const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
-                  await mkdir(speakerFolder, { recursive: true });
-                  const clipFilename = `clip_meeting_${meetingId}_${currentTime}.wav`;
-                  const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
-                  const clipWavBytes = encodeWav(mergedSamples, 16000);
-                  await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
+                    if (!clips.includes(clipRelativePath)) {
+                      clips.push(clipRelativePath);
+                    }
 
-                  if (!clips.includes(clipRelativePath)) {
-                    clips.push(clipRelativePath);
-                  }
-
-                  // 3. If Speechmatics identifiers are missing and client is configured, enroll audio slice directly in background
-                  if (this.client?.isConfigured && (!providerIds.speechmatics || providerIds.speechmatics.length === 0)) {
-                    void this.enrollSpeechmaticsClipBackground(targetSpeakerRow.id, clipWavBytes, clipFilename);
+                    if (this.client?.isConfigured && (!providerIds.speechmatics || providerIds.speechmatics.length === 0)) {
+                      void this.enrollSpeechmaticsClipBackground(targetSpeakerRow.id, clipWavBytes, clipFilename);
+                    }
                   }
                 }
               }
@@ -770,7 +893,6 @@ export class SpeakerService {
         }
       }
 
-      // Coalesce sequential segments from the same speaker into natural conversational turns
       const coalescedSegments = coalesceSpeakerSegments(segments, 15000);
 
       updatedTranscript = {
@@ -804,7 +926,7 @@ export class SpeakerService {
       )
       .execute();
 
-    // 6. Clean up meeting_speakers links for speakers no longer in the transcript
+    // 6. Clean up meeting_speakers links
     if (updatedTranscript && updatedTranscript.segments.length > 0) {
       const distinctSpeakerNames = new Set(
         updatedTranscript.segments.map((s) => (s.speaker || "").trim().toLowerCase()).filter(Boolean)
@@ -968,50 +1090,54 @@ export class SpeakerService {
         try {
           const audioBytes = new Uint8Array(await readFile(audioFullPath));
           if (audioBytes.byteLength >= 12) {
-            const decoded = await loadAudioSamples({ audioPath: audioFullPath, audioBytes }, 16000);
+            const decoded = await loadAudioSamples({ audioPath: audioFullPath, audioBytes, enhance: false }, 16000);
             const fullSamples = decoded.samples;
             const sStart = Math.floor((segment.startMs / 1000) * 16000);
             const sEnd = Math.min(fullSamples.length, Math.floor((segment.endMs / 1000) * 16000));
 
             if (sEnd > sStart) {
               const segSamples = fullSamples.subarray(sStart, sEnd);
-              const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
-              const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
+              const durationSec = segSamples.length / 16000;
 
-              const newEmbedding = await this.localEmbeddingExtractor.extract(segSamples, 16000);
-              const existingVec = providerIds.local?.[0] ? JSON.parse(providerIds.local[0]) : undefined;
-              const updatedVec = existingVec ? updateVoiceprintCentroid(existingVec, newEmbedding) : newEmbedding;
+              // Only add to trusted enrollment if duration is between 3.0s and 30.0s
+              if (durationSec >= 3.0 && durationSec <= 30.0) {
+                const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
+                const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
 
-              providerIds.local = [JSON.stringify(updatedVec)];
+                const newEmbedding = await this.localEmbeddingExtractor.extract(segSamples, 16000);
+                const localVectors = providerIds.local ?? [];
+                localVectors.push(JSON.stringify(newEmbedding));
+                providerIds.local = localVectors;
 
-              const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
-              await mkdir(speakerFolder, { recursive: true });
-              const clipFilename = `clip_confirmed_meeting_${meetingId}_${segmentIndex}_${currentTime}.wav`;
-              const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
-              const clipWavBytes = encodeWav(segSamples, 16000);
-              await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
+                const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
+                await mkdir(speakerFolder, { recursive: true });
+                const clipFilename = `clip_confirmed_meeting_${meetingId}_${segmentIndex}_${currentTime}.wav`;
+                const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
+                const clipWavBytes = encodeWav(segSamples, 16000);
+                await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
 
-              if (!clips.includes(clipRelativePath)) {
-                clips.push(clipRelativePath);
+                if (!clips.includes(clipRelativePath)) {
+                  clips.push(clipRelativePath);
+                }
+
+                await this.db
+                  .updateTable("speakers")
+                  .set({
+                    provider_ids: JSON.stringify(providerIds),
+                    enrollment_clip_paths: JSON.stringify(clips),
+                    enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
+                  })
+                  .where("id", "=", targetSpeakerRow.id)
+                  .execute();
+
+                targetSpeakerRow = await this.db
+                  .selectFrom("speakers")
+                  .selectAll()
+                  .where("id", "=", targetSpeakerRow.id)
+                  .executeTakeFirstOrThrow();
+
+                voiceprintEnrolled = true;
               }
-
-              await this.db
-                .updateTable("speakers")
-                .set({
-                  provider_ids: JSON.stringify(providerIds),
-                  enrollment_clip_paths: JSON.stringify(clips),
-                  enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
-                })
-                .where("id", "=", targetSpeakerRow.id)
-                .execute();
-
-              targetSpeakerRow = await this.db
-                .selectFrom("speakers")
-                .selectAll()
-                .where("id", "=", targetSpeakerRow.id)
-                .executeTakeFirstOrThrow();
-
-              voiceprintEnrolled = true;
             }
           }
         } catch (err) {
@@ -1139,7 +1265,6 @@ export class SpeakerService {
     await writeFile(tmpTxt, `${transcriptToText(updatedTranscript)}\n`, "utf8");
     await rename(tmpTxt, txtPath);
 
-    // Clean up meeting_speakers links for speakers no longer in the transcript
     const distinctSpeakerNames = new Set(
       segments.map((s) => (s.speaker || "").trim().toLowerCase()).filter(Boolean)
     );
@@ -1224,7 +1349,6 @@ export class SpeakerService {
     const targetSeg = segments[segmentIndex];
     let secondSpeakerName = options.newSpeakerName?.trim() || targetSeg.speaker;
 
-    // If newSpeakerId or newSpeakerName is given, resolve speaker
     let targetSpeakerRow: SpeakerRow | undefined;
     if (options.newSpeakerId) {
       targetSpeakerRow = await this.db
@@ -1281,7 +1405,6 @@ export class SpeakerService {
       const endMs1 = words1[words1.length - 1]?.endMs ?? Math.round((targetSeg.startMs + targetSeg.endMs) / 2);
       const startMs2 = words2[0]?.startMs ?? endMs1;
 
-      // Update speaker in second half words if changed
       if (secondSpeakerName !== targetSeg.speaker) {
         for (const w of words2) {
           w.speaker = secondSpeakerName;
@@ -1339,7 +1462,6 @@ export class SpeakerService {
       };
     }
 
-    // Replace original segment with the two new segments
     segments.splice(segmentIndex, 1, firstSeg, secondSeg);
 
     const updatedTranscript: Transcript = {
@@ -1358,7 +1480,6 @@ export class SpeakerService {
     await writeFile(tmpTxt, `${transcriptToText(updatedTranscript)}\n`, "utf8");
     await rename(tmpTxt, txtPath);
 
-    // Link target speaker in meeting_speakers if created or provided
     if (targetSpeakerRow) {
       await this.db
         .insertInto("meeting_speakers")
@@ -1471,7 +1592,6 @@ export class SpeakerService {
     await writeFile(tmpTxt, `${transcriptToText(updatedTranscript)}\n`, "utf8");
     await rename(tmpTxt, txtPath);
 
-    // Clean up any speaker links that are no longer referenced
     const distinctSpeakerNames = new Set(
       segments.map((s) => (s.speaker || "").trim().toLowerCase()).filter(Boolean)
     );
@@ -1527,27 +1647,18 @@ export class SpeakerService {
       targetProviderIds.speechmatics = Array.from(combinedSmIds);
     }
 
-    // Merge Local voiceprint embedding centroids
-    const localVectors: VoiceprintVector[] = [];
-    if (targetProviderIds.local?.[0]) {
-      try {
-        localVectors.push(JSON.parse(targetProviderIds.local[0]));
-      } catch {}
-    }
-    if (sourceProviderIds.local?.[0]) {
-      try {
-        localVectors.push(JSON.parse(sourceProviderIds.local[0]));
-      } catch {}
-    }
-    if (localVectors.length > 0) {
-      const mergedVector = mergeVoiceprintVectors(localVectors);
-      targetProviderIds.local = [JSON.stringify(mergedVector)];
+    // Merge Local independent trusted voiceprints
+    const combinedLocal = Array.from(new Set([
+      ...(targetProviderIds.local ?? []),
+      ...(sourceProviderIds.local ?? [])
+    ]));
+    if (combinedLocal.length > 0) {
+      targetProviderIds.local = combinedLocal;
     }
 
     const combinedClips = Array.from(new Set([...targetClips, ...sourceClips]));
     const enrolledAt = target.enrolled_at || source.enrolled_at || null;
 
-    // Update target speaker
     await this.db
       .updateTable("speakers")
       .set({
@@ -1558,7 +1669,6 @@ export class SpeakerService {
       .where("id", "=", targetSpeakerId)
       .execute();
 
-    // Re-link meetings
     const sourceMeetingLinks = await this.db
       .selectFrom("meeting_speakers")
       .selectAll()
@@ -1581,7 +1691,6 @@ export class SpeakerService {
         .execute();
     }
 
-    // Delete source speaker
     await this.db.deleteFrom("meeting_speakers").where("speaker_id", "=", sourceSpeakerId).execute();
     await this.db.deleteFrom("speakers").where("id", "=", sourceSpeakerId).execute();
 
@@ -1615,7 +1724,50 @@ export class SpeakerService {
 
     const speakerId = speakerRow?.id ?? options.speakerId ?? randomUUID();
 
-    // 1. Save enrollment clip to disk
+    // 1. Validate audio duration & deduplicate by content hash
+    const decoded = await loadAudioSamples({ audioBytes: options.audioBytes, enhance: false }, 16000);
+    const durationSec = decoded.samples.length / 16000;
+
+    if (durationSec < 2.5) {
+      throw new Error(
+        `Enrollment audio clip duration too short (${durationSec.toFixed(1)}s). Must be between 3 and 30 seconds.`
+      );
+    }
+    if (durationSec > 35.0) {
+      throw new Error(
+        `Enrollment audio clip duration too long (${durationSec.toFixed(1)}s). Must be between 3 and 30 seconds to ensure single-speaker sample.`
+      );
+    }
+
+    const clipHash = createHash("sha256").update(options.audioBytes).digest("hex");
+
+    // Cross-speaker conflict check
+    const allDbSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
+    for (const otherSpk of allDbSpeakers) {
+      if (otherSpk.id !== speakerId) {
+        const otherClips = parseJsonField<string[]>(otherSpk.enrollment_clip_paths, []);
+        for (const otherRel of otherClips) {
+          const otherFull = join(this.configDir, otherRel);
+          if (existsSync(otherFull)) {
+            try {
+              const otherBytes = new Uint8Array(await readFile(otherFull));
+              const otherHash = createHash("sha256").update(otherBytes).digest("hex");
+              if (otherHash === clipHash) {
+                throw new Error(
+                  `Cannot enroll clip: exact audio content is already enrolled under speaker "${otherSpk.name}"`
+                );
+              }
+            } catch (err) {
+              if (err instanceof Error && err.message.includes("already enrolled")) {
+                throw err;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Save enrollment clip to disk
     const ext = options.filename ? extname(options.filename).slice(1) || "wav" : "wav";
     const speakerFolder = join(this.configDir, "speakers", speakerId);
     await mkdir(speakerFolder, { recursive: true });
@@ -1629,25 +1781,20 @@ export class SpeakerService {
     const existingClips = speakerRow
       ? parseJsonField<string[]>(speakerRow.enrollment_clip_paths, [])
       : [];
-    existingClips.push(clipRelativePath);
 
-    // Cross-fill by default across both Local & Speechmatics when audio is provided
+    if (!existingClips.includes(clipRelativePath)) {
+      existingClips.push(clipRelativePath);
+    }
+
     const providerMode = options.provider ?? "both";
 
-    // 2. Extract Local Voiceprint Embedding (cross-filled)
-    if ((providerMode === "local" || providerMode === "both") && options.audioBytes.byteLength >= 12) {
+    // 3. Extract Neural Speaker Embedding Vector
+    if (providerMode === "local" || providerMode === "both") {
       try {
-        const decoded = await loadAudioSamples({ audioBytes: options.audioBytes }, 16000);
         const localEmbedding = await this.localEmbeddingExtractor.extract(decoded.samples, 16000);
-        const existingLocalVec = existingProviderIds.local?.[0]
-          ? JSON.parse(existingProviderIds.local[0])
-          : undefined;
-
-        const updatedLocalVec = existingLocalVec
-          ? updateVoiceprintCentroid(existingLocalVec, localEmbedding)
-          : localEmbedding;
-
-        existingProviderIds.local = [JSON.stringify(updatedLocalVec)];
+        const existingLocal = existingProviderIds.local ?? [];
+        existingLocal.push(JSON.stringify(localEmbedding));
+        existingProviderIds.local = existingLocal;
       } catch (err) {
         this.logger.warn("Could not compute local voiceprint from audio clip", {
           error: err instanceof Error ? err.message : String(err)
@@ -1655,7 +1802,7 @@ export class SpeakerService {
       }
     }
 
-    // 3. Submit enrollment job to Speechmatics (cross-filled if available)
+    // 4. Submit enrollment job to Speechmatics if available
     if (providerMode === "speechmatics" || providerMode === "both") {
       try {
         const submitResult = await this.client.submitJob({
@@ -1726,7 +1873,7 @@ export class SpeakerService {
       }
     }
 
-    // 4. Update database record
+    // 5. Update database record
     if (speakerRow) {
       await this.db
         .updateTable("speakers")
@@ -1788,7 +1935,6 @@ export class SpeakerService {
       throw new Error(`Meeting not found: ${meetingId}`);
     }
 
-    // Link in meeting_speakers table
     await this.db
       .insertInto("meeting_speakers")
       .values({
@@ -1803,7 +1949,6 @@ export class SpeakerService {
       )
       .execute();
 
-    // If a label was given (e.g. S1) and meetingsDir is available, check if we can extract voiceprint IDs from meeting transcript artifact
     if (speechmaticsLabel && this.meetingsDir) {
       const folder = meetingPaths(
         this.meetingsDir,
@@ -1824,7 +1969,6 @@ export class SpeakerService {
         try {
           const rawContent = await readFile(join(folder, transcriptArtifact.path), "utf8");
           const parsed = JSON.parse(rawContent);
-          // If the raw file contains speakers array
           if (parsed.speakers && Array.isArray(parsed.speakers)) {
             const match = parsed.speakers.find(
               (s: any) => (s.label || s.speaker || "").trim() === speechmaticsLabel.trim()
@@ -1850,9 +1994,7 @@ export class SpeakerService {
                 .execute();
             }
           }
-        } catch {
-          // non-fatal if transcript artifact cannot be read
-        }
+        } catch {}
       }
     }
 
@@ -1958,7 +2100,6 @@ export class SpeakerService {
             coalesced.map((s) => (s.speaker || "").trim().toLowerCase()).filter(Boolean)
           );
 
-          // Get linked meeting speakers
           const linked = await this.db
             .selectFrom("meeting_speakers")
             .innerJoin("speakers", "speakers.id", "meeting_speakers.speaker_id")
@@ -1976,7 +2117,6 @@ export class SpeakerService {
             }
           }
 
-          // Ensure speakers in distinctNames are linked
           const allSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
           for (const name of distinctNames) {
             const matchedSpeaker = allSpeakers.find(
@@ -2007,7 +2147,6 @@ export class SpeakerService {
       }
     }
 
-    // Clean up orphaned placeholder speakers and transfer any orphan Speechmatics identifiers to real speakers if applicable
     const allSpeakers = await this.db.selectFrom("speakers").selectAll().execute();
     const namedSpeakers = allSpeakers.filter((s) => !(/^speaker\s*\d+$/i.test(s.name.trim()) || /^s\d+$/i.test(s.name.trim())));
 
@@ -2022,7 +2161,6 @@ export class SpeakerService {
       const clips = parseJsonField<string[]>(s.enrollment_clip_paths, []);
       const providerIds = parseJsonField<Record<string, string[]>>(s.provider_ids, {});
 
-      // If this placeholder has speechmatics identifiers and only 1 named speaker exists (e.g. Matt Cowger), transfer if missing
       if (isPlaceholder && providerIds.speechmatics?.length && namedSpeakers.length > 0) {
         const primaryUser = namedSpeakers.find((ns) => ns.name.toLowerCase().includes("matt")) || namedSpeakers[0];
         if (primaryUser) {
@@ -2045,13 +2183,6 @@ export class SpeakerService {
         await this.db.deleteFrom("speakers").where("id", "=", s.id).execute();
         prunedSpeakers++;
       }
-    }
-
-    // Auto cross-fill voiceprints across providers if client is configured
-    if (this.client?.isConfigured) {
-      try {
-        await this.backfillVoiceprints({ force: false });
-      } catch {}
     }
 
     return { repairedMeetings, prunedSpeakers };

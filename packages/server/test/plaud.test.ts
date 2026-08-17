@@ -270,6 +270,7 @@ describe("Plaud API", () => {
       configDir: customConfigDir,
       meetingsDir: customMeetingsDir,
       backupsDir: join(customConfigDir, "backups"),
+      modelsDir: join(customConfigDir, "models"),
       databasePath: join(customConfigDir, "olive.sqlite"),
       settingsPath: join(customConfigDir, "settings.json"),
       plaudTokensPath: customTokensPath

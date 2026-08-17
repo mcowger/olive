@@ -1,46 +1,111 @@
 import type { LocalDiarizerConfig, LocalSpeakerSegment, VoiceprintVector } from "./types.ts";
-import { cosineSimilarity, type SpeakerEmbeddingExtractorInterface } from "./embedding.ts";
+import { type SpeakerEmbeddingExtractorInterface, normalizeVector } from "./embedding.ts";
+import { ensureSherpaModels, getSherpaOnnx } from "./sherpa-runtime.ts";
 
 export interface DiarizerInterface {
-  diarize(samples: Float32Array, sampleRate?: number, clusteringThresholdOverride?: number): Promise<LocalSpeakerSegment[]>;
+  diarize(
+    samples: Float32Array,
+    sampleRate?: number,
+    clusteringThresholdOverride?: number,
+    expectedSpeakerCount?: number
+  ): Promise<LocalSpeakerSegment[]>;
 }
 
-export class LocalSpeakerDiarizer implements DiarizerInterface {
+export interface SherpaDiarizerConfig extends LocalDiarizerConfig {
+  segmentationModelPath?: string;
+  embeddingModelPath?: string;
+  numThreads?: number;
+  minDurationOn?: number;
+  minDurationOff?: number;
+}
+
+/**
+ * Neural speaker diarizer powered by Sherpa-ONNX (Pyannote segmentation + ERes2Net embeddings + FastClustering).
+ */
+export class SherpaSpeakerDiarizer implements DiarizerInterface {
   private readonly embeddingExtractor: SpeakerEmbeddingExtractorInterface;
-  private readonly config: Required<LocalDiarizerConfig>;
+  private readonly config: SherpaDiarizerConfig;
+  private sherpaDiarizerInstance: any = null;
+  private initPromise: Promise<void> | null = null;
 
   constructor(
     embeddingExtractor: SpeakerEmbeddingExtractorInterface,
-    config: LocalDiarizerConfig = {}
+    config: SherpaDiarizerConfig = {}
   ) {
     this.embeddingExtractor = embeddingExtractor;
     this.config = {
-      frameSizeMs: config.frameSizeMs ?? 30,
-      frameShiftMs: config.frameShiftMs ?? 15,
-      energyThreshold: config.energyThreshold ?? 0.005,
-      minSpeechDurationMs: config.minSpeechDurationMs ?? 300,
-      minSilenceDurationMs: config.minSilenceDurationMs ?? 400,
-      clusteringThreshold: config.clusteringThreshold ?? 0.85
+      clusteringThreshold: config.clusteringThreshold ?? 0.5,
+      numThreads: config.numThreads ?? 2,
+      minDurationOn: config.minDurationOn ?? 0.3,
+      minDurationOff: config.minDurationOff ?? 0.5,
+      ...config
     };
+  }
+
+  private async ensureInitialized(numClusters?: number, thresholdOverride?: number): Promise<any> {
+    const sherpa = await getSherpaOnnx();
+    let segPath = this.config.segmentationModelPath;
+    let embPath = this.config.embeddingModelPath;
+
+    if (!segPath || !embPath) {
+      const paths = await ensureSherpaModels();
+      segPath = segPath || paths.segmentationModelPath;
+      embPath = embPath || paths.embeddingModelPath;
+    }
+
+    const numC = numClusters && numClusters > 0 ? numClusters : -1;
+    const thresh = thresholdOverride ?? this.config.clusteringThreshold ?? 0.5;
+
+    const diarizerConfig: any = {
+      segmentation: {
+        pyannote: {
+          model: segPath
+        },
+        numThreads: this.config.numThreads,
+        debug: false
+      },
+      embedding: {
+        model: embPath,
+        numThreads: this.config.numThreads,
+        debug: false
+      },
+      clustering: {
+        numClusters: numC,
+        threshold: thresh
+      },
+      minDurationOn: this.config.minDurationOn,
+      minDurationOff: this.config.minDurationOff
+    };
+
+    return new sherpa.OfflineSpeakerDiarization(diarizerConfig);
   }
 
   async diarize(
     samples: Float32Array,
     sampleRate = 16000,
-    clusteringThresholdOverride?: number
+    clusteringThresholdOverride?: number,
+    expectedSpeakerCount?: number
   ): Promise<LocalSpeakerSegment[]> {
     if (samples.length === 0) {
       return [];
     }
 
-    const effectiveClusteringThreshold = clusteringThresholdOverride ?? this.config.clusteringThreshold;
     const totalDurationMs = Math.round((samples.length / sampleRate) * 1000);
 
-    // 1. Voice Activity Detection (VAD) to find speech intervals
-    const rawSpeechIntervals = this.detectSpeechIntervals(samples, sampleRate);
+    // 1. Run neural speaker diarization
+    let rawSegments: Array<{ start: number; end: number; speaker: number }> = [];
+    try {
+      const diarizerInstance = await this.ensureInitialized(
+        expectedSpeakerCount,
+        clusteringThresholdOverride
+      );
+      rawSegments = diarizerInstance.process(samples) || [];
+    } catch {
+      rawSegments = [];
+    }
 
-    if (rawSpeechIntervals.length === 0) {
-      // If VAD detected nothing but audio has length, fallback to single whole chunk
+    // 2. If no segments found, fallback to single whole chunk
+    if (rawSegments.length === 0) {
       const emb = await this.embeddingExtractor.extract(samples, sampleRate);
       return [
         {
@@ -53,31 +118,26 @@ export class LocalSpeakerDiarizer implements DiarizerInterface {
       ];
     }
 
-    // 2. Extract embeddings for each detected speech interval
-    const candidateSegments: Array<{
-      startMs: number;
-      endMs: number;
-      samples: Float32Array;
-      embedding: VoiceprintVector;
-      clusterId: number;
-    }> = [];
+    // 3. Extract embeddings for each detected speech interval and build candidate segments
+    const candidateSegments: LocalSpeakerSegment[] = [];
 
-    for (const interval of rawSpeechIntervals) {
-      const startSample = Math.floor((interval.startMs / 1000) * sampleRate);
-      const endSample = Math.min(samples.length, Math.floor((interval.endMs / 1000) * sampleRate));
+    for (const raw of rawSegments) {
+      const startMs = Math.round(raw.start * 1000);
+      const endMs = Math.round(raw.end * 1000);
+      const startSample = Math.max(0, Math.floor(raw.start * sampleRate));
+      const endSample = Math.min(samples.length, Math.ceil(raw.end * sampleRate));
+
+      if (endSample <= startSample) continue;
+
       const segmentSamples = samples.subarray(startSample, endSample);
-
-      if (segmentSamples.length < Math.floor(sampleRate * 0.2)) {
-        continue; // Skip segments under 200ms
-      }
-
       const embedding = await this.embeddingExtractor.extract(segmentSamples, sampleRate);
+
       candidateSegments.push({
-        startMs: interval.startMs,
-        endMs: interval.endMs,
+        startMs,
+        endMs,
+        speakerId: `Speaker ${raw.speaker + 1}`,
         samples: segmentSamples,
-        embedding,
-        clusterId: -1
+        embedding
       });
     }
 
@@ -94,30 +154,10 @@ export class LocalSpeakerDiarizer implements DiarizerInterface {
       ];
     }
 
-    // 3. Cluster speech segments by embedding similarity within the recording
-    let nextClusterId = 1;
-    for (let i = 0; i < candidateSegments.length; i++) {
-      if (candidateSegments[i].clusterId !== -1) continue;
+    // 4. Sort segments chronologically
+    candidateSegments.sort((a, b) => a.startMs - b.startMs);
 
-      candidateSegments[i].clusterId = nextClusterId;
-
-      for (let j = i + 1; j < candidateSegments.length; j++) {
-        if (candidateSegments[j].clusterId !== -1) continue;
-
-        const sim = cosineSimilarity(
-          candidateSegments[i].embedding,
-          candidateSegments[j].embedding
-        );
-
-        if (sim >= effectiveClusteringThreshold) {
-          candidateSegments[j].clusterId = nextClusterId;
-        }
-      }
-
-      nextClusterId++;
-    }
-
-    // 4. Merge adjacent segments from the SAME speaker if the silence gap is small (< 400ms)
+    // 5. Merge adjacent segments from the SAME speaker if the gap is small (<= 1500ms)
     const mergedSegments: LocalSpeakerSegment[] = [];
     let current = candidateSegments[0];
 
@@ -125,101 +165,24 @@ export class LocalSpeakerDiarizer implements DiarizerInterface {
       const next = candidateSegments[i];
       const gapMs = next.startMs - current.endMs;
 
-      if (next.clusterId === current.clusterId && gapMs <= 1500) {
+      if (next.speakerId === current.speakerId && gapMs <= 1500 && gapMs >= 0) {
         // Extend current segment
-        current.endMs = next.endMs;
+        current.endMs = Math.max(current.endMs, next.endMs);
         const startSample = Math.floor((current.startMs / 1000) * sampleRate);
         const endSample = Math.min(samples.length, Math.floor((current.endMs / 1000) * sampleRate));
         current.samples = samples.subarray(startSample, endSample);
       } else {
-        mergedSegments.push({
-          startMs: current.startMs,
-          endMs: current.endMs,
-          speakerId: `Speaker ${current.clusterId}`,
-          samples: current.samples,
-          embedding: current.embedding
-        });
+        mergedSegments.push(current);
         current = next;
       }
     }
 
-    mergedSegments.push({
-      startMs: current.startMs,
-      endMs: current.endMs,
-      speakerId: `Speaker ${current.clusterId}`,
-      samples: current.samples,
-      embedding: current.embedding
-    });
-
+    mergedSegments.push(current);
     return mergedSegments;
   }
-
-  private detectSpeechIntervals(
-    samples: Float32Array,
-    sampleRate: number
-  ): Array<{ startMs: number; endMs: number }> {
-    const frameSize = Math.floor((this.config.frameSizeMs / 1000) * sampleRate);
-    const frameShift = Math.floor((this.config.frameShiftMs / 1000) * sampleRate);
-    const numFrames = Math.floor((samples.length - frameSize) / frameShift);
-
-    if (numFrames <= 0) {
-      return [{ startMs: 0, endMs: Math.round((samples.length / sampleRate) * 1000) }];
-    }
-
-    const frameEnergies = new Float32Array(numFrames);
-    let avgEnergy = 0;
-
-    for (let f = 0; f < numFrames; f++) {
-      const start = f * frameShift;
-      let energy = 0;
-      for (let i = 0; i < frameSize; i++) {
-        const s = samples[start + i];
-        energy += s * s;
-      }
-      energy = energy / frameSize;
-      frameEnergies[f] = energy;
-      avgEnergy += energy;
-    }
-    avgEnergy /= numFrames;
-
-    const threshold = Math.max(this.config.energyThreshold, avgEnergy * 0.4);
-
-    const intervals: Array<{ startMs: number; endMs: number }> = [];
-    let inSpeech = false;
-    let speechStartMs = 0;
-    let silenceStartMs = 0;
-
-    for (let f = 0; f < numFrames; f++) {
-      const currentMs = Math.round(((f * frameShift) / sampleRate) * 1000);
-      const isSpeechFrame = frameEnergies[f] >= threshold;
-
-      if (!inSpeech && isSpeechFrame) {
-        inSpeech = true;
-        speechStartMs = currentMs;
-        silenceStartMs = 0;
-      } else if (inSpeech && !isSpeechFrame) {
-        if (silenceStartMs === 0) {
-          silenceStartMs = currentMs;
-        } else if (currentMs - silenceStartMs >= this.config.minSilenceDurationMs) {
-          const duration = silenceStartMs - speechStartMs;
-          if (duration >= this.config.minSpeechDurationMs) {
-            intervals.push({ startMs: speechStartMs, endMs: silenceStartMs });
-          }
-          inSpeech = false;
-          silenceStartMs = 0;
-        }
-      } else if (inSpeech && isSpeechFrame) {
-        silenceStartMs = 0;
-      }
-    }
-
-    if (inSpeech) {
-      const endMs = Math.round((samples.length / sampleRate) * 1000);
-      if (endMs - speechStartMs >= this.config.minSpeechDurationMs) {
-        intervals.push({ startMs: speechStartMs, endMs });
-      }
-    }
-
-    return intervals;
-  }
 }
+
+/**
+ * Backward compatibility alias for local diarizer.
+ */
+export { SherpaSpeakerDiarizer as LocalSpeakerDiarizer };

@@ -669,6 +669,41 @@ export function createApp(options: AppOptions = {}): Hono {
     }
   });
 
+  app.post("/api/speakers/rebuild", async (c) => {
+    let body: { speakerId?: string; force?: boolean } = {};
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {}
+
+    try {
+      const result = await speakerService.rebuildSpeakerProfiles({
+        speakerId: body.speakerId,
+        force: body.force
+      });
+      return c.json({ status: "completed", ...result });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/speakers/:id/rebuild", async (c) => {
+    const id = c.req.param("id");
+    let body: { force?: boolean } = {};
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {}
+
+    try {
+      const result = await speakerService.rebuildSpeakerProfiles({
+        speakerId: id,
+        force: body.force
+      });
+      return c.json({ status: "completed", ...result });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   app.post("/api/speakers/:id/backfill", async (c) => {
     const id = c.req.param("id");
     let body: { force?: boolean } = {};

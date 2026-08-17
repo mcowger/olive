@@ -38,7 +38,7 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
     return Boolean(modelId.toLowerCase().includes("qwen"));
   }
 
-  async getEngineForModel(modelId: string) {
+  async getEngineForModel(modelId: string): Promise<any> {
     if (this.isGraniteModel(modelId)) {
       const cached = this.graniteCache.get(modelId);
       if (cached) return { isGranite: true, ...cached };

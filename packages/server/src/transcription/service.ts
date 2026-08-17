@@ -42,6 +42,8 @@ export interface TranscriptionServiceOptions {
 export interface TranscribeMeetingOptions {
   provider?: TranscriptionProviderName;
   language?: string;
+  candidateSpeakers?: string[];
+  expectedSpeakerCount?: number;
   poll?: boolean;
   pollIntervalMs?: number;
   maxPollWaitMs?: number;
@@ -338,11 +340,34 @@ export class TranscriptionService {
       // 1. Fetch enrolled speakers for cross-recording identification
       const enrolledSpeakers = await this.getEnrolledSpeakers();
 
+      // Extract candidate speakers and expected speaker count from meeting title if not explicitly passed
+      const candidateSpeakers: string[] = [];
+      const titleLower = meeting.title.toLowerCase();
+
+      // Look for enrolled speaker names mentioned in meeting title (e.g. "Matt", "Harrison", etc.)
+      for (const spk of enrolledSpeakers) {
+        const nameParts = spk.name.trim().toLowerCase().split(/\s+/);
+        if (nameParts.some((part) => part.length >= 3 && titleLower.includes(part))) {
+          candidateSpeakers.push(spk.name);
+        }
+      }
+
+      let expectedSpeakerCount = options.expectedSpeakerCount;
+      if (!expectedSpeakerCount) {
+        if (/1[:\-_/]?1|1-on-1|one-on-one|interview/i.test(meeting.title)) {
+          expectedSpeakerCount = 2;
+        } else if (candidateSpeakers.length > 0) {
+          expectedSpeakerCount = candidateSpeakers.length;
+        }
+      }
+
       // 2. Execute local transcription pipeline
       const { transcript, discoveredSpeakers } = await this.localPipeline.transcribe({
         audioPath: audioFullPath,
         language: options.language,
         enrolledSpeakers,
+        candidateSpeakers: candidateSpeakers.length > 0 ? candidateSpeakers : undefined,
+        expectedSpeakerCount,
         similarityThreshold: options.similarityThreshold,
         clusteringThreshold: options.clusteringThreshold,
         modelId: options.modelId,
@@ -987,32 +1012,16 @@ export class TranscriptionService {
       );
 
       const speakerId = existing?.id ?? (discovered.isEnrolled ? discovered.speakerId : randomUUID());
-      const voiceprintJson = JSON.stringify(discovered.voiceprint);
 
-      if (existing) {
-        const providerIds = parseJsonField<Record<string, string[]>>(existing.provider_ids, {});
-        providerIds[PROVIDER_LOCAL] = [voiceprintJson];
-
-        await this.db
-          .updateTable("speakers")
-          .set({
-            provider_ids: JSON.stringify(providerIds),
-            enrolled_at: existing.enrolled_at ?? currentTime
-          })
-          .where("id", "=", existing.id)
-          .execute();
-      } else {
-        const providerIds: Record<string, string[]> = {
-          [PROVIDER_LOCAL]: [voiceprintJson]
-        };
-
+      // If speaker does not exist in DB, insert a new placeholder record without pretending it's an enrolled voiceprint
+      if (!existing) {
         await this.db
           .insertInto("speakers")
           .values({
             id: speakerId,
             name: discovered.name,
-            provider_ids: JSON.stringify(providerIds),
-            enrolled_at: currentTime,
+            provider_ids: "{}",
+            enrolled_at: null,
             enrollment_clip_paths: "[]",
             created_at: currentTime
           })

@@ -71,6 +71,17 @@ try {
   console.warn(`[download-models] Qwen3-ASR GGUF download warning: ${err instanceof Error ? err.message : String(err)}`);
 }
 
+// 4. Download Sherpa-ONNX Neural Diarization & Speaker Embedding Models
+console.log(`[download-models] Fetching Sherpa-ONNX speaker models...`);
+try {
+  const { ensureSherpaModels } = await import("../packages/server/src/providers/local/sherpa-runtime.ts");
+  const modelsDir = process.env.OLIVE_MODELS_DIR || (existsSync("/app") ? "/app/data/models" : join(tmpdir(), "olive-models"));
+  const paths = await ensureSherpaModels(modelsDir);
+  console.log(`[download-models] Successfully cached Sherpa models: ${paths.embeddingModelPath}, ${paths.segmentationModelPath}`);
+} catch (err) {
+  console.warn(`[download-models] Sherpa models download warning: ${err instanceof Error ? err.message : String(err)}`);
+}
+
 // 2. Fetch and cache web model catalog for offline availability
 const defaultConfigDir = existsSync("/app") ? "/app/data/config" : join(tmpdir(), "olive-config");
 const configDir = process.env.OLIVE_CONFIG_DIR || defaultConfigDir;

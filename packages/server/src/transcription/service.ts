@@ -49,16 +49,24 @@ export interface TranscribeMeetingOptions {
   similarityThreshold?: number;
   clusteringThreshold?: number;
   modelId?: string;
+  signal?: AbortSignal;
   onProgress?: (update: TranscriptionProgressUpdate) => void | Promise<void>;
 }
 
 export interface TranscribeMeetingResult {
   stageRunId: string;
   jobId: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "cancelled";
   transcriptArtifactId?: string;
   transcriptTextArtifactId?: string;
   error?: string | null;
+}
+
+export interface ActiveTranscriptionJob {
+  abortController: AbortController;
+  provider: TranscriptionProviderName;
+  stageRunId?: string;
+  jobId?: string;
 }
 
 function parseJsonField<T>(value: string | null | undefined, fallback: T): T {
@@ -81,6 +89,7 @@ export class TranscriptionService {
   private readonly webhookSecret?: string;
   private readonly now: () => number;
   private summaryService?: SummaryService;
+  private readonly activeJobs = new Map<string, ActiveTranscriptionJob>();
 
   constructor(options: TranscriptionServiceOptions) {
     this.db = options.db;
@@ -138,6 +147,57 @@ export class TranscriptionService {
     return this.localPipeline;
   }
 
+  async cancelTranscription(meetingId: string): Promise<{ success: boolean; message: string }> {
+    this.logger.info("Cancelling transcription for meeting", { category: "transcription", meetingId });
+    const active = this.activeJobs.get(meetingId);
+    if (active) {
+      active.abortController.abort();
+      if (active.provider === "speechmatics" && active.jobId) {
+        try {
+          await this.client.deleteJob(active.jobId);
+        } catch (err) {
+          this.logger.warn("Failed to delete Speechmatics job during cancellation", {
+            jobId: active.jobId,
+            error: String(err)
+          });
+        }
+      }
+    }
+
+    const cancelTime = this.now();
+    await this.db
+      .updateTable("stage_runs")
+      .set({
+        status: "cancelled",
+        last_error: "Cancelled by user",
+        finished_at: cancelTime,
+        updated_at: cancelTime
+      })
+      .where("meeting_id", "=", meetingId)
+      .where("status", "=", "running")
+      .execute();
+
+    const meeting = await this.db
+      .selectFrom("meetings")
+      .select(["primary_transcript_artifact_id", "status"])
+      .where("id", "=", meetingId)
+      .executeTakeFirst();
+
+    if (meeting) {
+      await this.db
+        .updateTable("meetings")
+        .set({
+          status: meeting.primary_transcript_artifact_id ? "ready" : "pending",
+          last_error: null,
+          updated_at: cancelTime
+        })
+        .where("id", "=", meetingId)
+        .execute();
+    }
+
+    return { success: true, message: "Transcription cancelled successfully" };
+  }
+
   async transcribeMeeting(
     meetingId: string,
     options: TranscribeMeetingOptions = {}
@@ -152,11 +212,30 @@ export class TranscriptionService {
       force: Boolean(options.force)
     });
 
-    if (provider === "local") {
-      return this.transcribeMeetingLocal(meetingId, options);
+    const abortController = new AbortController();
+    if (options.signal) {
+      if (options.signal.aborted) {
+        abortController.abort();
+      } else {
+        options.signal.addEventListener("abort", () => abortController.abort(), { once: true });
+      }
     }
 
-    return this.transcribeMeetingSpeechmatics(meetingId, options);
+    const activeJob: ActiveTranscriptionJob = {
+      abortController,
+      provider
+    };
+    this.activeJobs.set(meetingId, activeJob);
+
+    try {
+      if (provider === "local") {
+        return await this.transcribeMeetingLocal(meetingId, { ...options, signal: abortController.signal });
+      }
+
+      return await this.transcribeMeetingSpeechmatics(meetingId, { ...options, signal: abortController.signal });
+    } finally {
+      this.activeJobs.delete(meetingId);
+    }
   }
 
   /**
@@ -267,6 +346,7 @@ export class TranscriptionService {
         similarityThreshold: options.similarityThreshold,
         clusteringThreshold: options.clusteringThreshold,
         modelId: options.modelId,
+        signal: options.signal,
         onProgress: options.onProgress
       });
 
@@ -345,9 +425,48 @@ export class TranscriptionService {
       };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
+      const isCancelled = Boolean(options.signal?.aborted || errorMsg.toLowerCase().includes("cancel"));
+      const errTime = this.now();
+
+      if (isCancelled) {
+        this.logger.info("Local transcription cancelled by user", { meetingId });
+        await this.db
+          .updateTable("stage_runs")
+          .set({
+            status: "cancelled",
+            last_error: "Cancelled by user",
+            finished_at: errTime,
+            updated_at: errTime
+          })
+          .where("id", "=", stageRunId)
+          .execute();
+
+        const existingMeeting = await this.db
+          .selectFrom("meetings")
+          .select(["primary_transcript_artifact_id"])
+          .where("id", "=", meetingId)
+          .executeTakeFirst();
+
+        await this.db
+          .updateTable("meetings")
+          .set({
+            status: existingMeeting?.primary_transcript_artifact_id ? "ready" : "pending",
+            last_error: null,
+            updated_at: errTime
+          })
+          .where("id", "=", meetingId)
+          .execute();
+
+        return {
+          stageRunId,
+          jobId: "",
+          status: "cancelled",
+          error: "Cancelled by user"
+        };
+      }
+
       this.logger.error("Failed to run local transcription", { meetingId, error: errorMsg });
 
-      const errTime = this.now();
       await this.db
         .updateTable("stage_runs")
         .set({
@@ -557,6 +676,12 @@ export class TranscriptionService {
       message: `Job ${submitResult.id.slice(0, 10)}... accepted by Speechmatics. Cloud processing...`
     });
 
+    const currentActive = this.activeJobs.get(meetingId);
+    if (currentActive) {
+      currentActive.stageRunId = stageRunId;
+      currentActive.jobId = submitResult.id;
+    }
+
     if (options.poll) {
       return await this.pollUntilComplete(
         meetingId,
@@ -564,7 +689,8 @@ export class TranscriptionService {
         submitResult.id,
         options.pollIntervalMs ?? 2000,
         options.maxPollWaitMs ?? 180_000,
-        options.onProgress
+        options.onProgress,
+        options.signal
       );
     }
 
@@ -581,12 +707,49 @@ export class TranscriptionService {
     jobId: string,
     intervalMs = 2000,
     maxWaitMs = 180_000,
-    onProgress?: (update: TranscriptionProgressUpdate) => void | Promise<void>
+    onProgress?: (update: TranscriptionProgressUpdate) => void | Promise<void>,
+    signal?: AbortSignal
   ): Promise<TranscribeMeetingResult> {
     const startTime = this.now();
     let pollCount = 0;
 
     while (this.now() - startTime < maxWaitMs) {
+      if (signal?.aborted) {
+        try {
+          await this.client.deleteJob(jobId);
+        } catch {}
+
+        const cancelTime = this.now();
+        await this.db
+          .updateTable("stage_runs")
+          .set({ status: "cancelled", last_error: "Cancelled by user", finished_at: cancelTime, updated_at: cancelTime })
+          .where("id", "=", stageRunId)
+          .execute();
+
+        const existingMeeting = await this.db
+          .selectFrom("meetings")
+          .select(["primary_transcript_artifact_id"])
+          .where("id", "=", meetingId)
+          .executeTakeFirst();
+
+        await this.db
+          .updateTable("meetings")
+          .set({
+            status: existingMeeting?.primary_transcript_artifact_id ? "ready" : "pending",
+            last_error: null,
+            updated_at: cancelTime
+          })
+          .where("id", "=", meetingId)
+          .execute();
+
+        return {
+          stageRunId,
+          jobId,
+          status: "cancelled",
+          error: "Cancelled by user"
+        };
+      }
+
       pollCount++;
       const elapsedMs = this.now() - startTime;
       const elapsedSec = Math.round(elapsedMs / 1000);

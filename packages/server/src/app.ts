@@ -431,25 +431,49 @@ export function createApp(options: AppOptions = {}): Hono {
               }
             });
 
-            await stream.writeSSE({
-              event: "result",
-              data: JSON.stringify({
-                stage: "done",
-                percent: 100,
-                message: "Transcription complete!",
-                result
-              })
-            });
+            if (result.status === "cancelled") {
+              await stream.writeSSE({
+                event: "cancelled",
+                data: JSON.stringify({
+                  stage: "cancelled",
+                  percent: 0,
+                  message: "Transcription was cancelled.",
+                  result
+                })
+              });
+            } else {
+              await stream.writeSSE({
+                event: "result",
+                data: JSON.stringify({
+                  stage: "done",
+                  percent: 100,
+                  message: "Transcription complete!",
+                  result
+                })
+              });
+            }
           } catch (err) {
-            await stream.writeSSE({
-              event: "error",
-              data: JSON.stringify({
-                stage: "error",
-                percent: 0,
-                message: err instanceof Error ? err.message : String(err),
-                error: err instanceof Error ? err.message : String(err)
-              })
-            });
+            const isCancelled = err instanceof Error && err.message.toLowerCase().includes("cancel");
+            if (isCancelled) {
+              await stream.writeSSE({
+                event: "cancelled",
+                data: JSON.stringify({
+                  stage: "cancelled",
+                  percent: 0,
+                  message: "Transcription was cancelled."
+                })
+              });
+            } else {
+              await stream.writeSSE({
+                event: "error",
+                data: JSON.stringify({
+                  stage: "error",
+                  percent: 0,
+                  message: err instanceof Error ? err.message : String(err),
+                  error: err instanceof Error ? err.message : String(err)
+                })
+              });
+            }
           } finally {
             clearInterval(pingInterval);
           }
@@ -471,6 +495,16 @@ export function createApp(options: AppOptions = {}): Hono {
       return c.json(result, result.status === "error" ? 502 : 200);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/transcribe/cancel", async (c) => {
+    const meetingId = c.req.param("id");
+    try {
+      const result = await transcriptionService.cancelTranscription(meetingId);
+      return c.json(result, 200);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
   });
 
@@ -675,7 +709,14 @@ export function createApp(options: AppOptions = {}): Hono {
 
   app.post("/api/meetings/:id/speakers/reassign", async (c) => {
     const meetingId = c.req.param("id");
-    let body: { fromLabel?: string; toSpeakerName?: string; toSpeakerId?: string; adoptVoiceprint?: boolean };
+    let body: {
+      fromLabel?: string;
+      toSpeakerName?: string;
+      toSpeakerId?: string;
+      adoptVoiceprint?: boolean;
+      segmentIndex?: number;
+      scope?: "single" | "all";
+    };
     try {
       body = await c.req.json();
     } catch {
@@ -692,7 +733,117 @@ export function createApp(options: AppOptions = {}): Hono {
         fromLabel: body.fromLabel,
         toSpeakerName: body.toSpeakerName,
         toSpeakerId: body.toSpeakerId,
-        adoptVoiceprint: body.adoptVoiceprint
+        adoptVoiceprint: body.adoptVoiceprint,
+        segmentIndex: body.segmentIndex,
+        scope: body.scope
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/speakers/confirm-segment", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: { segmentIndex?: number; speakerName?: string; speakerId?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    if (body.segmentIndex === undefined || typeof body.segmentIndex !== "number") {
+      return c.json({ error: "segmentIndex is required and must be a number" }, 400);
+    }
+
+    try {
+      const result = await speakerService.confirmMeetingSegmentSpeaker({
+        meetingId,
+        segmentIndex: body.segmentIndex,
+        speakerName: body.speakerName,
+        speakerId: body.speakerId
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/speakers/unassign-segment", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: { segmentIndex?: number };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    if (body.segmentIndex === undefined || typeof body.segmentIndex !== "number") {
+      return c.json({ error: "segmentIndex is required and must be a number" }, 400);
+    }
+
+    try {
+      const result = await speakerService.unassignMeetingSegmentSpeaker({
+        meetingId,
+        segmentIndex: body.segmentIndex
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/speakers/split-segment", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: {
+      segmentIndex?: number;
+      wordIndex?: number;
+      splitMs?: number;
+      newSpeakerName?: string;
+      newSpeakerId?: string;
+    };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    if (body.segmentIndex === undefined || typeof body.segmentIndex !== "number") {
+      return c.json({ error: "segmentIndex is required and must be a number" }, 400);
+    }
+
+    try {
+      const result = await speakerService.splitMeetingSegment({
+        meetingId,
+        segmentIndex: body.segmentIndex,
+        wordIndex: body.wordIndex,
+        splitMs: body.splitMs,
+        newSpeakerName: body.newSpeakerName,
+        newSpeakerId: body.newSpeakerId
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/speakers/merge-segments", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: { segmentIndex?: number };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Valid JSON body required" }, 400);
+    }
+
+    if (body.segmentIndex === undefined || typeof body.segmentIndex !== "number") {
+      return c.json({ error: "segmentIndex is required and must be a number" }, 400);
+    }
+
+    try {
+      const result = await speakerService.mergeMeetingSegments({
+        meetingId,
+        segmentIndex: body.segmentIndex
       });
       return c.json(result);
     } catch (err) {

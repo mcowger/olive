@@ -63,7 +63,7 @@ export interface StageRunTable {
   id: string;
   meeting_id: string;
   stage: string;
-  status: Generated<"pending" | "running" | "done" | "error">;
+  status: Generated<"pending" | "running" | "done" | "error" | "cancelled">;
   provider_job_id: string | null;
   attempts: Generated<number>;
   last_error: string | null;
@@ -225,6 +225,7 @@ export interface TranscriptSegment {
   endMs: number;
   speaker: string;
   text: string;
+  verified?: boolean;
   words?: TranscriptWord[];
 }
 

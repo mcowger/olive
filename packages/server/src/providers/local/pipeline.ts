@@ -32,6 +32,7 @@ export interface TranscribeAudioOptions {
   similarityThreshold?: number;
   clusteringThreshold?: number;
   modelId?: string;
+  signal?: AbortSignal;
   onProgress?: TranscriptionProgressCallback;
 }
 
@@ -69,6 +70,10 @@ export class LocalTranscriptionPipeline {
    * speaker diarization and cross-recording speaker identification.
    */
   async transcribe(options: TranscribeAudioOptions): Promise<LocalTranscriptionResult> {
+    if (options.signal?.aborted) {
+      throw new Error("Transcription cancelled by user");
+    }
+
     await options.onProgress?.({
       stage: "decoding",
       percent: 5,
@@ -80,6 +85,10 @@ export class LocalTranscriptionPipeline {
     const decoded = await loadAudioSamples(options, targetSampleRate);
     const samples = decoded.samples;
     const durationMs = decoded.durationMs;
+
+    if (options.signal?.aborted) {
+      throw new Error("Transcription cancelled by user");
+    }
 
     await options.onProgress?.({
       stage: "diarizing",
@@ -94,6 +103,10 @@ export class LocalTranscriptionPipeline {
       targetSampleRate,
       options.clusteringThreshold
     );
+
+    if (options.signal?.aborted) {
+      throw new Error("Transcription cancelled by user");
+    }
 
     const totalSegments = speakerSegments.length;
     await options.onProgress?.({
@@ -134,6 +147,10 @@ export class LocalTranscriptionPipeline {
 
     // 4. Match speaker segments across recordings & update voiceprint centroids
     for (let i = 0; i < speakerSegments.length; i++) {
+      if (options.signal?.aborted) {
+        throw new Error("Transcription cancelled by user");
+      }
+
       const seg = speakerSegments[i];
       const currentNumber = i + 1;
       const progressPercent = Math.min(95, Math.round(25 + ((i + 0.5) / Math.max(1, totalSegments)) * 70));

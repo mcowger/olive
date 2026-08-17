@@ -706,4 +706,303 @@ describe("Local ASR, Diarization & Voiceprint Pipeline", () => {
     await rm(configDir, { recursive: true, force: true });
     await rm(meetingsDir, { recursive: true, force: true });
   });
+
+  test("Cancel inflight local transcription via service and API", async () => {
+    const configDir = await mkdtemp(join(process.cwd(), "packages/server/test/cancel-test-"));
+    const meetingsDir = join(configDir, "meetings");
+    await mkdir(meetingsDir, { recursive: true });
+
+    const handle = createDb(":memory:");
+    const meetingId = "m-cancel-test";
+    const now = 1700000000000;
+
+    const paths = meetingPaths(meetingsDir, now, "Cancel Test", meetingId);
+    await mkdir(paths.audioDir, { recursive: true });
+    const audioBytes = createSyntheticMultiSpeakerWav();
+    await writeFile(join(paths.audioDir, "rec.wav"), audioBytes);
+
+    await handle.db
+      .insertInto("meetings")
+      .values({
+        id: meetingId,
+        title: "Cancel Test",
+        start_time: now,
+        end_time: now + 2600,
+        source: "upload",
+        status: "pending",
+        tags: "[]",
+        primary_transcript_artifact_id: null,
+        primary_summary_artifact_id: null,
+        last_error: null,
+        created_at: now,
+        updated_at: now
+      })
+      .execute();
+
+    await handle.db
+      .insertInto("recordings")
+      .values({
+        id: "rec-cancel-1",
+        meeting_id: meetingId,
+        path: "audio/rec.wav",
+        mime: "audio/wav",
+        duration_ms: 2600,
+        size_bytes: audioBytes.byteLength,
+        sha256: "fake-sha-cancel",
+        provider: "upload",
+        provider_recording_id: null,
+        created_at: now
+      })
+      .execute();
+
+    const localPipeline = new LocalTranscriptionPipeline(
+      {},
+      undefined,
+      undefined,
+      new MockLocalAsrEngine()
+    );
+
+    const transcriptionService = new TranscriptionService({
+      db: handle.db,
+      meetingsDir,
+      localPipeline,
+      defaultProvider: "local",
+      now: () => now + 50
+    });
+
+    const abortController = new AbortController();
+    abortController.abort();
+
+    // Start with already aborted signal
+    const result = await transcriptionService.transcribeMeeting(meetingId, {
+      provider: "local",
+      signal: abortController.signal
+    });
+
+    expect(result.status).toBe("cancelled");
+
+    const stageRun = await handle.db
+      .selectFrom("stage_runs")
+      .selectAll()
+      .where("meeting_id", "=", meetingId)
+      .executeTakeFirst();
+
+    expect(stageRun?.status).toBe("cancelled");
+
+    // Test cancellation via API
+    const app = createApp({
+      db: handle.db,
+      paths: {
+        configDir,
+        databasePath: ":memory:",
+        meetingsDir,
+        backupsDir: join(configDir, "backups"),
+        templatesDir: join(configDir, "templates"),
+        settingsPath: join(configDir, "settings.json"),
+        plaudTokensPath: join(configDir, "plaud-tokens.json")
+      },
+      transcriptionService
+    });
+
+    const cancelRes = await app.request(`/api/meetings/${meetingId}/transcribe/cancel`, {
+      method: "POST"
+    });
+    expect(cancelRes.status).toBe(200);
+    const cancelBody = await cancelRes.json();
+    expect(cancelBody.success).toBe(true);
+
+    await handle.db.destroy();
+    handle.sqlite.close();
+    await rm(configDir, { recursive: true, force: true });
+    await rm(meetingsDir, { recursive: true, force: true });
+  });
+
+  test("Segment-level speaker verification, single-segment reassignment, and unassigning", async () => {
+    const configDir = await mkdtemp(join(process.cwd(), "packages/server/test/seg-verify-test-"));
+    const meetingsDir = join(configDir, "meetings");
+    await mkdir(meetingsDir, { recursive: true });
+
+    const handle = createDb(":memory:");
+    const meetingId = "m-seg-verify-test";
+    const now = 1700000000000;
+
+    const paths = meetingPaths(meetingsDir, now, "Verification Test", meetingId);
+    await mkdir(paths.audioDir, { recursive: true });
+    await mkdir(paths.transcriptsDir, { recursive: true });
+
+    const audioBytes = createSyntheticMultiSpeakerWav();
+    await writeFile(join(paths.audioDir, "rec.wav"), audioBytes);
+
+    const initialTranscript = {
+      segments: [
+        { speaker: "Speaker 1", text: "First turn by speaker one.", startMs: 0, endMs: 1000 },
+        { speaker: "Speaker 2", text: "Second turn by speaker two.", startMs: 1600, endMs: 2600 }
+      ],
+      language: "en",
+      durationMs: 2600
+    };
+
+    await writeFile(
+      join(paths.transcriptsDir, "local.json"),
+      JSON.stringify(initialTranscript, null, 2),
+      "utf8"
+    );
+
+    await handle.db
+      .insertInto("meetings")
+      .values({
+        id: meetingId,
+        title: "Verification Test",
+        start_time: now,
+        end_time: now + 2600,
+        source: "upload",
+        status: "ready",
+        tags: "[]",
+        primary_transcript_artifact_id: null,
+        primary_summary_artifact_id: null,
+        last_error: null,
+        created_at: now,
+        updated_at: now
+      })
+      .execute();
+
+    await handle.db
+      .insertInto("recordings")
+      .values({
+        id: "rec-1",
+        meeting_id: meetingId,
+        path: "audio/rec.wav",
+        mime: "audio/wav",
+        duration_ms: 2600,
+        size_bytes: audioBytes.byteLength,
+        sha256: "fake-sha-verify",
+        provider: "upload",
+        provider_recording_id: null,
+        created_at: now
+      })
+      .execute();
+
+    await handle.db
+      .insertInto("artifacts")
+      .values({
+        id: "art-json-1",
+        meeting_id: meetingId,
+        recording_id: "rec-1",
+        kind: "transcript",
+        provider: "local",
+        format: "json",
+        path: "transcripts/local.json",
+        created_at: now
+      })
+      .execute();
+
+    await handle.db
+      .updateTable("meetings")
+      .set({ primary_transcript_artifact_id: "art-json-1" })
+      .where("id", "=", meetingId)
+      .execute();
+
+    const speakerService = new SpeakerService({
+      db: handle.db,
+      configDir,
+      meetingsDir,
+      now: () => now + 100
+    });
+
+    const app = createApp({
+      db: handle.db,
+      paths: {
+        configDir,
+        databasePath: ":memory:",
+        meetingsDir,
+        backupsDir: join(configDir, "backups"),
+        templatesDir: join(configDir, "templates"),
+        settingsPath: join(configDir, "settings.json"),
+        plaudTokensPath: join(configDir, "plaud-tokens.json")
+      },
+      speakerService
+    });
+
+    // 1. Confirm segment 0 as "Alice"
+    const confirmRes = await app.request(`/api/meetings/${meetingId}/speakers/confirm-segment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        segmentIndex: 0,
+        speakerName: "Alice"
+      })
+    });
+    expect(confirmRes.status).toBe(200);
+    const confirmBody = await confirmRes.json();
+    expect(confirmBody.speaker.name).toBe("Alice");
+    expect(confirmBody.transcript.segments[0].speaker).toBe("Alice");
+    expect(confirmBody.transcript.segments[0].verified).toBe(true);
+    expect(confirmBody.voiceprintEnrolled).toBe(true);
+
+    // 2. Reassign segment 1 specifically to "Bob" (scope: "single")
+    const reassignRes = await app.request(`/api/meetings/${meetingId}/speakers/reassign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fromLabel: "Speaker 2",
+        toSpeakerName: "Bob",
+        segmentIndex: 1,
+        scope: "single"
+      })
+    });
+    expect(reassignRes.status).toBe(200);
+    const reassignBody = await reassignRes.json();
+    expect(reassignBody.speaker.name).toBe("Bob");
+    expect(reassignBody.transcript.segments[1].speaker).toBe("Bob");
+    expect(reassignBody.transcript.segments[1].verified).toBe(true);
+
+    // 3. Mark segment 1 as incorrect / unassigned
+    const unassignRes = await app.request(`/api/meetings/${meetingId}/speakers/unassign-segment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        segmentIndex: 1
+      })
+    });
+    expect(unassignRes.status).toBe(200);
+    const unassignBody = await unassignRes.json();
+    expect(unassignBody.transcript.segments[1].speaker).toBe("Unknown");
+    expect(unassignBody.transcript.segments[1].verified).toBe(false);
+
+    // 4. Split segment 0 ("First turn by speaker one.") at word index 2 -> "First turn" & "by speaker one." with new speaker "Charlie"
+    const splitRes = await app.request(`/api/meetings/${meetingId}/speakers/split-segment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        segmentIndex: 0,
+        wordIndex: 2,
+        newSpeakerName: "Charlie"
+      })
+    });
+    expect(splitRes.status).toBe(200);
+    const splitBody = await splitRes.json();
+    expect(splitBody.transcript.segments.length).toBe(3);
+    expect(splitBody.transcript.segments[0].text).toBe("First turn");
+    expect(splitBody.transcript.segments[0].speaker).toBe("Alice");
+    expect(splitBody.transcript.segments[1].text).toBe("by speaker one.");
+    expect(splitBody.transcript.segments[1].speaker).toBe("Charlie");
+
+    // 5. Merge segments 0 and 1 back together
+    const mergeRes = await app.request(`/api/meetings/${meetingId}/speakers/merge-segments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        segmentIndex: 0
+      })
+    });
+    expect(mergeRes.status).toBe(200);
+    const mergeBody = await mergeRes.json();
+    expect(mergeBody.transcript.segments.length).toBe(2);
+    expect(mergeBody.transcript.segments[0].text).toBe("First turn by speaker one.");
+
+    await handle.db.destroy();
+    handle.sqlite.close();
+    await rm(configDir, { recursive: true, force: true });
+    await rm(meetingsDir, { recursive: true, force: true });
+  });
 });

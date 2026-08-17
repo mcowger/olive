@@ -767,13 +767,16 @@ function MeetingDetailView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [transcribing, setTranscribing] = useState(false);
+  const [cancellingTranscription, setCancellingTranscription] = useState(false);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionProgressUpdate | null>(null);
+  const transcriptionAbortRef = useRef<AbortController | null>(null);
   const [selectedEngine, setSelectedEngine] = useState<string>("local:granite");
   const [showDiarizationSettings, setShowDiarizationSettings] = useState(false);
   const [customClusteringThreshold, setCustomClusteringThreshold] = useState(0.85);
   const [customSimilarityThreshold, setCustomSimilarityThreshold] = useState(0.85);
   const [enhancedAudio, setEnhancedAudio] = useState(true);
-  const [reassigningSpeaker, setReassigningSpeaker] = useState<string | null>(null);
+  const [reassigningSpeaker, setReassigningSpeaker] = useState<{ speaker: string; segmentIndex?: number } | null>(null);
+  const [splittingSegment, setSplittingSegment] = useState<{ segmentIndex: number; speaker: string; text: string; startMs: number; endMs: number } | null>(null);
   const [showSummaryModal, setShowSummaryModal] = useState(false);
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
   const [summaryViewMode, setSummaryViewMode] = useState<"rendered" | "raw">("rendered");
@@ -818,8 +821,39 @@ function MeetingDetailView({
     void fetchDetail();
   }, [meetingId]);
 
+  const handleCancelTranscription = async () => {
+    setCancellingTranscription(true);
+    if (transcriptionAbortRef.current) {
+      try {
+        transcriptionAbortRef.current.abort();
+      } catch {}
+      transcriptionAbortRef.current = null;
+    }
+
+    setTranscriptionProgress({
+      stage: "done",
+      percent: 0,
+      message: "Cancelling transcription..."
+    });
+
+    try {
+      await fetch(`/api/meetings/${meetingId}/transcribe/cancel`, { method: "POST" });
+    } catch (err) {
+      console.warn("Failed to call cancel API:", err);
+    } finally {
+      setTranscribing(false);
+      setCancellingTranscription(false);
+      await fetchDetail();
+      setTimeout(() => setTranscriptionProgress(null), 2500);
+    }
+  };
+
   const handleTriggerTranscription = async () => {
     setTranscribing(true);
+    setCancellingTranscription(false);
+    const abortController = new AbortController();
+    transcriptionAbortRef.current = abortController;
+
     setTranscriptionProgress({
       stage: "decoding",
       percent: 3,
@@ -836,6 +870,7 @@ function MeetingDetailView({
     try {
       const res = await fetch(`/api/meetings/${meetingId}/transcribe?stream=true`, {
         method: "POST",
+        signal: abortController.signal,
         headers: {
           "content-type": "application/json",
           "accept": "text/event-stream"
@@ -890,6 +925,13 @@ function MeetingDetailView({
                   const data = JSON.parse(dataStr);
                   if (event === "progress" || event === "result") {
                     setTranscriptionProgress(data);
+                  } else if (event === "cancelled") {
+                    setTranscriptionProgress({
+                      stage: "done",
+                      percent: 0,
+                      message: "Transcription was cancelled."
+                    });
+                    setTranscribing(false);
                   } else if (event === "error") {
                     setError(data.error || data.message || "Transcription failed");
                   }
@@ -899,7 +941,11 @@ function MeetingDetailView({
               }
             }
           }
-        } catch (streamErr) {
+        } catch (streamErr: any) {
+          if (abortController.signal.aborted || streamErr?.name === "AbortError") {
+            // Client explicitly cancelled
+            return;
+          }
           // If stream disconnected while backend is still processing, poll meeting status
           console.warn("SSE stream interrupted, falling back to status polling...", streamErr);
           setTranscriptionProgress({
@@ -908,6 +954,7 @@ function MeetingDetailView({
             message: "Finalizing transcription on server..."
           });
           for (let i = 0; i < 30; i++) {
+            if (abortController.signal.aborted) break;
             await new Promise((r) => setTimeout(r, 2000));
             const check = await fetch(`/api/meetings/${meetingId}`).then((r) => r.json()).catch(() => null);
             if (check?.meeting?.status === "ready" || check?.transcriptContent) {
@@ -918,9 +965,14 @@ function MeetingDetailView({
       }
 
       await fetchDetail();
-    } catch (err) {
+    } catch (err: any) {
+      if (abortController.signal.aborted || err?.name === "AbortError") {
+        // User cancelled, ignore fetch abortion error
+        return;
+      }
       alert(`Transcription error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
+      transcriptionAbortRef.current = null;
       setTranscribing(false);
       setTimeout(() => setTranscriptionProgress(null), 4000);
     }
@@ -961,45 +1013,91 @@ function MeetingDetailView({
     });
   };
 
-  let parsedTranscriptSegments: Array<{ speaker: string; text: string; startMs: number; endMs: number }> = [];
+  const handleConfirmSegment = async (segmentIndex: number) => {
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/speakers/confirm-segment`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ segmentIndex })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      await fetchDetail();
+      onSpeakerUpdated();
+    } catch (err) {
+      alert(`Failed to confirm speaker: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleUnassignSegment = async (segmentIndex: number) => {
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/speakers/unassign-segment`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ segmentIndex })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      await fetchDetail();
+      onSpeakerUpdated();
+    } catch (err) {
+      alert(`Failed to unassign speaker: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleMergeWithNext = async (segmentIndex: number) => {
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/speakers/merge-segments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ segmentIndex })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      await fetchDetail();
+      onSpeakerUpdated();
+    } catch (err) {
+      alert(`Failed to merge segments: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  let parsedTranscriptSegments: Array<{
+    speaker: string;
+    text: string;
+    startMs: number;
+    endMs: number;
+    verified?: boolean;
+    segmentIndex: number;
+  }> = [];
   if (detail?.transcriptContent) {
     try {
       const parsed = JSON.parse(detail.transcriptContent);
-      let raw: Array<{ speaker: string; text: string; startMs: number; endMs: number }> = [];
       if (Array.isArray(parsed.segments)) {
-        raw = parsed.segments.map((s: any) => ({
+        parsedTranscriptSegments = parsed.segments.map((s: any, idx: number) => ({
           speaker: s.speaker || "Speaker",
           text: s.text || s.content || "",
           startMs: s.startMs ?? s.start_time ?? 0,
-          endMs: s.endMs ?? s.end_time ?? 0
+          endMs: s.endMs ?? s.end_time ?? 0,
+          verified: Boolean(s.verified),
+          segmentIndex: idx
         }));
       } else if (Array.isArray(parsed)) {
-        raw = parsed
+        parsedTranscriptSegments = parsed
           .filter((item: any) => item.content && item.content.trim())
-          .map((item: any) => ({
+          .map((item: any, idx: number) => ({
             speaker: item.speaker || "Speaker",
             text: item.content,
             startMs: item.start_time ?? 0,
-            endMs: item.end_time ?? 0
+            endMs: item.end_time ?? 0,
+            verified: Boolean(item.verified),
+            segmentIndex: idx
           }));
-      }
-
-      if (raw.length > 0) {
-        const merged: typeof raw = [];
-        let cur = { ...raw[0] };
-        for (let i = 1; i < raw.length; i++) {
-          const next = raw[i];
-          if (cur.speaker.trim().toLowerCase() === next.speaker.trim().toLowerCase()) {
-            const glue = cur.text.trim() && next.text.trim() ? " " : "";
-            cur.text = `${cur.text.trim()}${glue}${next.text.trim()}`.trim();
-            cur.endMs = Math.max(cur.endMs, next.endMs);
-          } else {
-            if (cur.text.trim()) merged.push(cur);
-            cur = { ...next };
-          }
-        }
-        if (cur.text.trim()) merged.push(cur);
-        parsedTranscriptSegments = merged;
       }
     } catch {
       // plain text fallback
@@ -1068,30 +1166,48 @@ function MeetingDetailView({
                 )}
               </div>
 
-              <button
-                type="button"
-                disabled={transcribing}
-                onClick={() => void handleTriggerTranscription()}
-                className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-75 disabled:cursor-not-allowed shadow-md"
-              >
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={transcribing}
+                  onClick={() => void handleTriggerTranscription()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-75 disabled:cursor-not-allowed shadow-md"
+                >
+                  {transcribing && (
+                    <svg className="h-4 w-4 animate-spin text-stone-950" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                  )}
+                  <span>
+                    {transcribing
+                      ? transcriptionProgress
+                        ? transcriptionProgress.stage === "diarizing"
+                          ? `Diarizing (${transcriptionProgress.percent || 15}%)…`
+                          : transcriptionProgress.stage === "decoding"
+                          ? "Enhancing Audio…"
+                          : `Transcribing (${transcriptionProgress.percent || 25}%)…`
+                        : "Transcribing…"
+                      : "Transcribe"}
+                  </span>
+                </button>
+
                 {transcribing && (
-                  <svg className="h-4 w-4 animate-spin text-stone-950" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                  </svg>
+                  <button
+                    type="button"
+                    disabled={cancellingTranscription}
+                    onClick={() => void handleCancelTranscription()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/20 hover:border-rose-500/60 disabled:opacity-50 shadow-md"
+                    title="Cancel inflight transcription"
+                  >
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18"></line>
+                      <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                    <span>{cancellingTranscription ? "Cancelling…" : "Cancel"}</span>
+                  </button>
                 )}
-                <span>
-                  {transcribing
-                    ? transcriptionProgress
-                      ? transcriptionProgress.stage === "diarizing"
-                        ? `Diarizing (${transcriptionProgress.percent || 15}%)…`
-                        : transcriptionProgress.stage === "decoding"
-                        ? "Enhancing Audio…"
-                        : `Transcribing (${transcriptionProgress.percent || 25}%)…`
-                      : "Transcribing…"
-                    : "Transcribe"}
-                </span>
-              </button>
+              </div>
             </div>
           </header>
 
@@ -1133,6 +1249,21 @@ function MeetingDetailView({
                   <span className="font-bold text-lime-400 text-sm">
                     {transcriptionProgress.percent}%
                   </span>
+
+                  {transcribing && (
+                    <button
+                      type="button"
+                      disabled={cancellingTranscription}
+                      onClick={() => void handleCancelTranscription()}
+                      className="ml-1 inline-flex items-center gap-1 rounded bg-rose-500/20 px-2 py-0.5 text-[11px] font-semibold text-rose-300 border border-rose-500/40 hover:bg-rose-500/30 transition disabled:opacity-50"
+                    >
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                      </svg>
+                      <span>{cancellingTranscription ? "Cancelling…" : "Cancel"}</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1440,7 +1571,7 @@ function MeetingDetailView({
             {parsedTranscriptSegments.length > 0 ? (
               <div className="space-y-4 rounded-xl border border-stone-800 bg-stone-900/60 p-6">
                 {parsedTranscriptSegments.map((seg, idx) => (
-                  <div key={idx} className="flex gap-4">
+                  <div key={idx} className="group flex gap-4 rounded-lg p-2 transition hover:bg-stone-800/30">
                     <button
                       type="button"
                       onClick={() => {
@@ -1456,14 +1587,73 @@ function MeetingDetailView({
                     </button>
                     <div className="flex-1 space-y-1">
                       <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setReassigningSpeaker(seg.speaker)}
-                          title="Click to rename or enroll person from this turn"
-                          className="rounded bg-stone-800 px-2 py-0.5 text-xs font-semibold text-lime-400 hover:bg-lime-400 hover:text-stone-950 transition"
-                        >
-                          {seg.speaker} ✎
-                        </button>
+                        {seg.verified ? (
+                          <span
+                            className="inline-flex items-center gap-1 rounded bg-lime-500/20 px-2 py-0.5 text-xs font-semibold text-lime-300 border border-lime-500/40"
+                            title="Speaker verified & voiceprint trained"
+                          >
+                            <span>✓</span>
+                            <span>{seg.speaker}</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded bg-stone-800 px-2 py-0.5 text-xs font-semibold text-stone-300 border border-stone-700">
+                            {seg.speaker}
+                          </span>
+                        )}
+
+                        {/* Quick Verification, Splitting & Correction Actions */}
+                        <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition-opacity">
+                          {!seg.verified && seg.speaker !== "Unknown" && (
+                            <button
+                              type="button"
+                              onClick={() => void handleConfirmSegment(seg.segmentIndex)}
+                              title={`Confirm "${seg.speaker}" is correct & update voiceprint`}
+                              className="rounded bg-lime-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-lime-400 border border-lime-500/30 hover:bg-lime-500 hover:text-stone-950 transition"
+                            >
+                              ✓ Confirm
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => setReassigningSpeaker({ speaker: seg.speaker, segmentIndex: seg.segmentIndex })}
+                            title="Change speaker for this turn or all turns"
+                            className="rounded bg-stone-800 px-1.5 py-0.5 text-[11px] font-medium text-stone-300 border border-stone-700 hover:bg-stone-700 hover:text-stone-100 transition"
+                          >
+                            ✎ Change
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setSplittingSegment(seg)}
+                            title="Split this turn into two separate segments"
+                            className="rounded bg-stone-800 px-1.5 py-0.5 text-[11px] font-medium text-amber-400 border border-stone-700 hover:bg-amber-400 hover:text-stone-950 transition"
+                          >
+                            ✂ Split
+                          </button>
+
+                          {idx < parsedTranscriptSegments.length - 1 && (
+                            <button
+                              type="button"
+                              onClick={() => void handleMergeWithNext(seg.segmentIndex)}
+                              title="Merge this turn with the following turn"
+                              className="rounded bg-stone-800 px-1.5 py-0.5 text-[11px] font-medium text-stone-400 border border-stone-700 hover:bg-stone-700 hover:text-stone-200 transition"
+                            >
+                              ⛓ Merge
+                            </button>
+                          )}
+
+                          {seg.speaker !== "Unknown" && (
+                            <button
+                              type="button"
+                              onClick={() => void handleUnassignSegment(seg.segmentIndex)}
+                              title="Mark as incorrect (reset to Unknown speaker)"
+                              className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[11px] font-medium text-rose-400 border border-rose-500/30 hover:bg-rose-500 hover:text-stone-950 transition"
+                            >
+                              ✕ Wrong
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <p className="text-sm leading-relaxed text-stone-200">{seg.text}</p>
                     </div>
@@ -1494,17 +1684,57 @@ function MeetingDetailView({
             />
           )}
 
+          {/* Split Segment Modal */}
+          {splittingSegment && (
+            <SplitSegmentModal
+              meetingId={meetingId}
+              segment={splittingSegment}
+              knownSpeakers={knownSpeakers}
+              onClose={() => setSplittingSegment(null)}
+              onSuccess={async () => {
+                setSplittingSegment(null);
+                await fetchDetail();
+                onSpeakerUpdated();
+              }}
+            />
+          )}
+
           {/* Reassign Speaker Modal */}
           {reassigningSpeaker && (
             <ReassignSpeakerModal
               meetingId={meetingId}
-              fromLabel={reassigningSpeaker}
+              fromLabel={reassigningSpeaker.speaker}
+              segmentIndex={reassigningSpeaker.segmentIndex}
               knownSpeakers={knownSpeakers}
               onClose={() => setReassigningSpeaker(null)}
-              onSuccess={async () => {
+              onSuccess={(optimistic) => {
+                const prevLabel = reassigningSpeaker.speaker;
                 setReassigningSpeaker(null);
-                await fetchDetail();
-                onSpeakerUpdated();
+                if (optimistic && detail?.transcriptContent) {
+                  try {
+                    const parsed = JSON.parse(detail.transcriptContent);
+                    if (Array.isArray(parsed.segments)) {
+                      if (optimistic.scope === "single" && optimistic.segmentIndex !== undefined) {
+                        if (parsed.segments[optimistic.segmentIndex]) {
+                          parsed.segments[optimistic.segmentIndex].speaker = optimistic.targetName;
+                          parsed.segments[optimistic.segmentIndex].verified = true;
+                        }
+                      } else {
+                        for (const s of parsed.segments) {
+                          if ((s.speaker || "").trim().toLowerCase() === prevLabel.trim().toLowerCase()) {
+                            s.speaker = optimistic.targetName;
+                            s.verified = true;
+                          }
+                        }
+                      }
+                      setDetail((prev) => (prev ? { ...prev, transcriptContent: JSON.stringify(parsed) } : prev));
+                    }
+                  } catch {}
+                }
+                setTimeout(() => {
+                  void fetchDetail();
+                  onSpeakerUpdated();
+                }, 400);
               }}
             />
           )}
@@ -1763,63 +1993,72 @@ function GenerateSummaryModal({
 function ReassignSpeakerModal({
   meetingId,
   fromLabel,
+  segmentIndex,
   knownSpeakers,
   onClose,
   onSuccess
 }: {
   meetingId: string;
   fromLabel: string;
+  segmentIndex?: number;
   knownSpeakers: SpeakerWithStats[];
   onClose: () => void;
-  onSuccess: () => void;
+  onSuccess: (optimistic?: { targetName: string; scope: "single" | "all"; segmentIndex?: number }) => void;
 }): ReactElement {
   const [selectedSpeakerId, setSelectedSpeakerId] = useState<string>("");
   const [customName, setCustomName] = useState<string>("");
+  const [scope, setScope] = useState<"single" | "all">(segmentIndex !== undefined ? "single" : "all");
   const [adoptVoiceprint, setAdoptVoiceprint] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitting(true);
 
-    try {
-      const payload: any = {
-        fromLabel,
-        adoptVoiceprint
-      };
+    let resolvedTargetName = "";
+    let targetId: string | undefined = undefined;
 
-      if (selectedSpeakerId === "new" || !selectedSpeakerId) {
-        if (!customName.trim()) {
-          alert("Please enter a name for the new speaker");
-          setSubmitting(false);
-          return;
-        }
-        payload.toSpeakerName = customName.trim();
-      } else {
-        payload.toSpeakerId = selectedSpeakerId;
-        const matched = knownSpeakers.find((s) => s.id === selectedSpeakerId);
-        if (matched) {
-          payload.toSpeakerName = matched.name;
-        }
+    if (selectedSpeakerId === "new" || !selectedSpeakerId) {
+      if (!customName.trim()) {
+        alert("Please enter a name for the new speaker");
+        return;
       }
-
-      const res = await fetch(`/api/meetings/${meetingId}/speakers/reassign`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || `HTTP ${res.status}`);
-      }
-
-      onSuccess();
-    } catch (err) {
-      alert(`Failed to reassign speaker: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setSubmitting(false);
+      resolvedTargetName = customName.trim();
+    } else {
+      targetId = selectedSpeakerId;
+      const matched = knownSpeakers.find((s) => s.id === selectedSpeakerId);
+      resolvedTargetName = matched ? matched.name : selectedSpeakerId;
     }
+
+    const payload: any = {
+      fromLabel,
+      adoptVoiceprint,
+      segmentIndex,
+      scope,
+      toSpeakerName: resolvedTargetName,
+      toSpeakerId: targetId
+    };
+
+    // 1. Immediately dismiss modal and optimistically update caller
+    onSuccess({
+      targetName: resolvedTargetName,
+      scope,
+      segmentIndex
+    });
+
+    // 2. Fire request asynchronously in background
+    void fetch(`/api/meetings/${meetingId}/speakers/reassign`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          console.error("Async speaker reassignment error:", data.error || `HTTP ${res.status}`);
+        }
+      })
+      .catch((err) => {
+        console.error("Async speaker reassignment network error:", err);
+      });
   };
 
   return (
@@ -1833,6 +2072,40 @@ function ReassignSpeakerModal({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {segmentIndex !== undefined && (
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-stone-400 mb-1.5">
+                Apply Scope
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setScope("single")}
+                  className={`rounded-lg border px-3 py-2 text-xs font-semibold transition text-left ${
+                    scope === "single"
+                      ? "border-lime-400 bg-lime-400/20 text-lime-300"
+                      : "border-stone-800 bg-stone-950 text-stone-400 hover:text-stone-200"
+                  }`}
+                >
+                  <div className="font-bold">This turn only</div>
+                  <div className="text-[10px] text-stone-400 font-normal mt-0.5">Correct single turn</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScope("all")}
+                  className={`rounded-lg border px-3 py-2 text-xs font-semibold transition text-left ${
+                    scope === "all"
+                      ? "border-lime-400 bg-lime-400/20 text-lime-300"
+                      : "border-stone-800 bg-stone-950 text-stone-400 hover:text-stone-200"
+                  }`}
+                >
+                  <div className="font-bold">All "{fromLabel}" turns</div>
+                  <div className="text-[10px] text-stone-400 font-normal mt-0.5">Batch rename all</div>
+                </button>
+              </div>
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-stone-400 mb-1">
               Select Person
@@ -1846,7 +2119,7 @@ function ReassignSpeakerModal({
               <option value="new">+ Create New Person</option>
               {knownSpeakers.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.name} ({s.providerIds.speechmatics?.length ? "Voiceprint enrolled" : "Discovered"})
+                  {s.name} ({s.providerIds.speechmatics?.length || s.providerIds.local?.length ? "Voiceprint enrolled" : "Discovered"})
                 </option>
               ))}
             </select>
@@ -1876,9 +2149,9 @@ function ReassignSpeakerModal({
               className="h-4 w-4 rounded border-stone-700 bg-stone-900 text-lime-400 focus:ring-lime-400"
             />
             <label htmlFor="voiceprint-toggle" className="text-xs text-stone-300 leading-snug cursor-pointer">
-              <span className="font-semibold text-stone-100">Learn voiceprint from this meeting</span>
+              <span className="font-semibold text-stone-100">Learn voiceprint from this audio</span>
               <br />
-              Speechmatics will automatically identify this person by name in future recordings.
+              Olive will automatically recognize and attribute this person in future meetings.
             </label>
           </div>
 
@@ -1896,6 +2169,234 @@ function ReassignSpeakerModal({
               className="rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 hover:bg-lime-300 disabled:opacity-50"
             >
               {submitting ? "Saving…" : "Apply & Save"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function SplitSegmentModal({
+  meetingId,
+  segment,
+  knownSpeakers,
+  onClose,
+  onSuccess
+}: {
+  meetingId: string;
+  segment: {
+    segmentIndex: number;
+    speaker: string;
+    text: string;
+    startMs: number;
+    endMs: number;
+  };
+  knownSpeakers: SpeakerWithStats[];
+  onClose: () => void;
+  onSuccess: () => void;
+}): ReactElement {
+  const words = useMemo(() => segment.text.split(/\s+/).filter(Boolean), [segment.text]);
+  const [splitWordIndex, setSplitWordIndex] = useState<number>(Math.max(1, Math.floor(words.length / 2)));
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState<string>("");
+  const [customName, setCustomName] = useState<string>("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const durationMs = segment.endMs - segment.startMs;
+  const ratio = splitWordIndex / Math.max(1, words.length);
+  const splitTimestamp = Math.round(segment.startMs + ratio * durationMs);
+
+  const part1Text = words.slice(0, splitWordIndex).join(" ");
+  const part2Text = words.slice(splitWordIndex).join(" ");
+
+  const part2SpeakerName =
+    selectedSpeakerId === "new"
+      ? customName || "New Speaker"
+      : selectedSpeakerId
+      ? knownSpeakers.find((s) => s.id === selectedSpeakerId)?.name || segment.speaker
+      : segment.speaker;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+
+    try {
+      const payload: any = {
+        segmentIndex: segment.segmentIndex,
+        wordIndex: splitWordIndex
+      };
+
+      if (selectedSpeakerId === "new") {
+        if (!customName.trim()) {
+          alert("Please enter a name for the new speaker");
+          setSubmitting(false);
+          return;
+        }
+        payload.newSpeakerName = customName.trim();
+      } else if (selectedSpeakerId) {
+        payload.newSpeakerId = selectedSpeakerId;
+        const matched = knownSpeakers.find((s) => s.id === selectedSpeakerId);
+        if (matched) {
+          payload.newSpeakerName = matched.name;
+        }
+      }
+
+      const res = await fetch(`/api/meetings/${meetingId}/speakers/split-segment`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+
+      onSuccess();
+    } catch (err) {
+      alert(`Failed to split segment: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/80 backdrop-blur-sm p-4">
+      <div className="w-full max-w-2xl rounded-2xl border border-stone-800 bg-stone-900 p-6 shadow-2xl space-y-5">
+        <div className="flex items-center justify-between border-b border-stone-800 pb-3">
+          <div>
+            <h3 className="text-lg font-semibold flex items-center gap-2">
+              <span>✂ Split Turn:</span>
+              <span className="text-lime-400">{segment.speaker}</span>
+            </h3>
+            <p className="text-xs text-stone-400 mt-0.5">
+              Click any word to choose where to split this turn into two separate segments.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="text-stone-400 hover:text-stone-200 text-lg">
+            ✕
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Interactive Word Picker */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-stone-400 mb-2">
+              Select Split Point (Click any word)
+            </label>
+            <div className="rounded-xl border border-stone-800 bg-stone-950 p-4 leading-loose flex flex-wrap gap-1.5 items-center max-h-56 overflow-y-auto">
+              {words.map((word, idx) => {
+                const isPart1 = idx < splitWordIndex;
+                const isSplitTarget = idx === splitWordIndex;
+                return (
+                  <React.Fragment key={idx}>
+                    {isSplitTarget && (
+                      <span className="inline-flex items-center gap-1 rounded bg-amber-400 px-1.5 py-0.5 text-[11px] font-bold text-stone-950 shadow-md animate-pulse">
+                        ✂ Split Point
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setSplitWordIndex(idx === 0 ? 1 : idx)}
+                      className={`rounded px-1.5 py-0.5 text-xs font-medium transition cursor-pointer ${
+                        isPart1
+                          ? "bg-lime-500/20 text-lime-300 border border-lime-500/40 hover:bg-lime-500/30"
+                          : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30"
+                      }`}
+                      title={`Click to split before "${word}"`}
+                    >
+                      {word}
+                    </button>
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Split Comparison Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* Part 1 */}
+            <div className="rounded-xl border border-lime-500/30 bg-lime-950/10 p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-lime-400 uppercase tracking-wide">
+                  Part 1 ({segment.speaker})
+                </span>
+                <span className="font-mono text-stone-400 text-[11px]">
+                  {formatTimeOffset(segment.startMs)} → {formatTimeOffset(splitTimestamp)}
+                </span>
+              </div>
+              <p className="text-xs text-stone-300 line-clamp-4 italic">
+                "{part1Text || "(empty)"}"
+              </p>
+            </div>
+
+            {/* Part 2 */}
+            <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/10 p-3.5 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-cyan-400 uppercase tracking-wide">
+                  Part 2 ({part2SpeakerName})
+                </span>
+                <span className="font-mono text-stone-400 text-[11px]">
+                  {formatTimeOffset(splitTimestamp)} → {formatTimeOffset(segment.endMs)}
+                </span>
+              </div>
+              <p className="text-xs text-stone-300 line-clamp-4 italic">
+                "{part2Text || "(empty)"}"
+              </p>
+            </div>
+          </div>
+
+          {/* Reassign Part 2 Speaker */}
+          <div className="space-y-3 pt-1 border-t border-stone-800">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-stone-400 mb-1">
+                Speaker for Part 2
+              </label>
+              <select
+                value={selectedSpeakerId}
+                onChange={(e) => setSelectedSpeakerId(e.target.value)}
+                className="w-full rounded-lg border border-stone-800 bg-stone-950 px-3 py-2 text-sm text-stone-100 focus:border-cyan-400 focus:outline-none"
+              >
+                <option value="">Keep as "{segment.speaker}"</option>
+                <option value="new">+ Create New Person</option>
+                {knownSpeakers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.providerIds.speechmatics?.length || s.providerIds.local?.length ? "Voiceprint enrolled" : "Discovered"})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {selectedSpeakerId === "new" && (
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-stone-400 mb-1">
+                  New Person Name
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Harrison"
+                  value={customName}
+                  onChange={(e) => setCustomName(e.target.value)}
+                  className="w-full rounded-lg border border-stone-800 bg-stone-950 px-3 py-2 text-sm text-stone-100 placeholder-stone-500 focus:border-cyan-400 focus:outline-none"
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-sm font-medium text-stone-400 hover:text-stone-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || !part1Text || !part2Text}
+              className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-stone-950 hover:bg-amber-300 disabled:opacity-50 transition"
+            >
+              {submitting ? "Splitting…" : "Confirm & Split Turn"}
             </button>
           </div>
         </form>

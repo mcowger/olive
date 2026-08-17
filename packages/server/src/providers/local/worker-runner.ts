@@ -205,13 +205,20 @@ export class LocalTranscriptionWorkerRunner {
 
   stop(): void {
     this.terminateWorker();
-    for (const task of this.queue) {
-      task.reject(new Error("Transcription runner stopped"));
+    while (this.queue.length > 0) {
+      const task = this.queue.shift();
+      if (task) {
+        try {
+          task.reject(new Error("Transcription runner stopped"));
+        } catch {}
+      }
     }
-    this.queue.length = 0;
     if (this.currentTask) {
-      this.currentTask.reject(new Error("Transcription runner stopped"));
+      const task = this.currentTask;
       this.currentTask = null;
+      try {
+        task.reject(new Error("Transcription runner stopped"));
+      } catch {}
     }
   }
 }

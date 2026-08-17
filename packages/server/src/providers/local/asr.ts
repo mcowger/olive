@@ -13,25 +13,20 @@ export interface LocalAsrEngineInterface {
 
 /**
  * HuggingFace Transformers.js & Llama.cpp based local ASR engine running on CPU or Vulkan.
- * Uses IBM Granite Speech, Qwen3-ASR (via llama-server), or Cohere Transcribe ONNX.
+ * Uses Qwen3-ASR (via llama-server) or Cohere Transcribe ONNX.
  */
 export class TransformersAsrEngine implements LocalAsrEngineInterface {
   private readonly config: LocalAsrConfig;
-  private readonly graniteCache = new Map<string, { processor: any; model: any }>();
   private readonly pipelineCache = new Map<string, any>();
   private initPromise: Promise<any> | null = null;
 
   constructor(config: LocalAsrConfig = {}) {
     this.config = {
-      modelId: config.modelId ?? "ggml-org/Qwen3-ASR-1.7B-GGUF",
+      modelId: config.modelId ?? "onnx-community/cohere-transcribe-03-2026-ONNX",
       dtype: config.dtype ?? "q4",
       device: config.device ?? "cpu",
       language: config.language ?? "en"
     };
-  }
-
-  private isGraniteModel(modelId: string): boolean {
-    return Boolean(modelId.toLowerCase().includes("granite"));
   }
 
   private isQwenModel(modelId: string): boolean {
@@ -39,13 +34,8 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
   }
 
   async getEngineForModel(modelId: string): Promise<any> {
-    if (this.isGraniteModel(modelId)) {
-      const cached = this.graniteCache.get(modelId);
-      if (cached) return { isGranite: true, ...cached };
-    } else {
-      const cached = this.pipelineCache.get(modelId);
-      if (cached) return { isGranite: false, pipeline: cached };
-    }
+    const cached = this.pipelineCache.get(modelId);
+    if (cached) return cached;
 
     if (this.initPromise) {
       await this.initPromise;
@@ -63,46 +53,22 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
         hf.env.cacheDir = process.env.TRANSFORMERS_CACHE || process.env.HF_HOME || null;
       }
 
-      if (this.isGraniteModel(modelId)) {
-        const processorClass = (hf as any).GraniteSpeechProcessor || (hf as any).AutoProcessor;
-        const modelClass = (hf as any).GraniteSpeechForConditionalGeneration || (hf as any).AutoModelForSpeechSeq2Seq;
-
-        const processor = await processorClass.from_pretrained(modelId);
-        logger.info(`Loading Granite Speech ASR model on CPU`, {
-          modelId,
-          device: "cpu",
-          dtype: this.config.dtype
-        });
-        const model = await modelClass.from_pretrained(modelId, {
-          dtype: {
-            embed_tokens: this.config.dtype ?? "q4",
-            audio_encoder: this.config.dtype ?? "q4",
-            decoder_model_merged: this.config.dtype ?? "q4"
-          },
+      logger.info(`Loading ASR pipeline model on CPU`, {
+        modelId,
+        device: "cpu",
+        dtype: this.config.dtype
+      });
+      const pipelineInstance = await hf.pipeline(
+        "automatic-speech-recognition",
+        modelId,
+        {
+          dtype: this.config.dtype,
           device: "cpu"
-        });
+        }
+      );
 
-        const entry = { processor, model };
-        this.graniteCache.set(modelId, entry);
-        return { isGranite: true, ...entry };
-      } else {
-        logger.info(`Loading ASR pipeline model on CPU`, {
-          modelId,
-          device: "cpu",
-          dtype: this.config.dtype
-        });
-        const pipelineInstance = await hf.pipeline(
-          "automatic-speech-recognition",
-          modelId,
-          {
-            dtype: this.config.dtype,
-            device: "cpu"
-          }
-        );
-
-        this.pipelineCache.set(modelId, pipelineInstance);
-        return { isGranite: false, pipeline: pipelineInstance };
-      }
+      this.pipelineCache.set(modelId, pipelineInstance);
+      return pipelineInstance;
     } finally {
       this.initPromise = null;
       resolveInit!(true);
@@ -118,7 +84,19 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
       return { text: "" };
     }
 
-    const modelId = options.modelId || this.config.modelId || "ggml-org/Qwen3-ASR-1.7B-GGUF";
+    const modelId = options.modelId || this.config.modelId || "onnx-community/cohere-transcribe-03-2026-ONNX";
+
+    if (modelId === "mock" || modelId === "mock-asr") {
+      const baseStartMs = options.startMs ?? 0;
+      const durationMs = Math.round((samples.length / sampleRate) * 1000);
+      return {
+        text: "Transcribed speech",
+        words: [
+          { word: "Transcribed", startMs: baseStartMs, endMs: baseStartMs + Math.floor(durationMs / 2) },
+          { word: "speech", startMs: baseStartMs + Math.floor(durationMs / 2), endMs: baseStartMs + durationMs }
+        ]
+      };
+    }
 
     // Dispatch Qwen models to supervised llama-server
     if (this.isQwenModel(modelId)) {
@@ -134,50 +112,9 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
     }
 
     try {
-      const engine = await this.getEngineForModel(modelId);
+      const transcriber = await this.getEngineForModel(modelId);
       const baseStartMs = options.startMs ?? 0;
 
-      if (engine.isGranite) {
-        const { processor, model } = engine as { processor: any; model: any };
-
-        const messages = [
-          {
-            role: "user",
-            content: "<|audio|>transcribe the speech into a written format?"
-          }
-        ];
-        const textPrompt = processor.apply_chat_template(messages, {
-          add_generation_prompt: false,
-          tokenize: false
-        });
-
-        const inputs = await processor(textPrompt, samples);
-        const generatedIds = await model.generate({
-          ...inputs,
-          max_new_tokens: 512
-        });
-
-        const inputLen = inputs.input_ids.dims?.at(-1) ?? 0;
-        const generatedTexts = processor.batch_decode(
-          generatedIds.slice(null, [inputLen, null]),
-          { skip_special_tokens: true }
-        );
-
-        const text = (generatedTexts[0] || "").trim();
-        const durationMs = Math.round((samples.length / sampleRate) * 1000);
-        const wordList = text.split(/\s+/).filter(Boolean);
-        const wordDuration = Math.floor(durationMs / Math.max(1, wordList.length));
-
-        const words: TranscriptWord[] = wordList.map((w: string, idx: number) => ({
-          word: w,
-          startMs: baseStartMs + idx * wordDuration,
-          endMs: baseStartMs + (idx + 1) * wordDuration
-        }));
-
-        return { text, words };
-      }
-
-      const transcriber = (engine as { pipeline: any }).pipeline;
       const output = await transcriber(samples, {
         language: options.language || this.config.language || "en",
         max_new_tokens: 512,

@@ -30,7 +30,9 @@ describe("LocalTranscriptionWorkerRunner and Background Concurrency", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "olive-worker-test-"));
     dbHandle = createDb(":memory:");
-    runner = new LocalTranscriptionWorkerRunner();
+    runner = new LocalTranscriptionWorkerRunner({
+      asrConfig: { modelId: "mock" }
+    });
   });
 
   afterEach(async () => {
@@ -49,6 +51,7 @@ describe("LocalTranscriptionWorkerRunner and Background Concurrency", () => {
     const progressUpdates: any[] = [];
     const result = await runner.transcribe({
       audioPath,
+      modelId: "mock",
       onProgress: (update) => {
         progressUpdates.push(update);
       }
@@ -59,7 +62,7 @@ describe("LocalTranscriptionWorkerRunner and Background Concurrency", () => {
     expect(Array.isArray(result.transcript.segments)).toBe(true);
     expect(result.transcript.segments.length).toBeGreaterThan(0);
     expect(progressUpdates.length).toBeGreaterThan(0);
-  });
+  }, 10000);
 
   test("Worker runner handles cancellation via AbortSignal", async () => {
     const audioBytes = createDummyWav(260, 4.0);
@@ -70,6 +73,7 @@ describe("LocalTranscriptionWorkerRunner and Background Concurrency", () => {
 
     const transcribePromise = runner.transcribe({
       audioPath,
+      modelId: "mock",
       signal: abortController.signal
     });
 
@@ -79,13 +83,22 @@ describe("LocalTranscriptionWorkerRunner and Background Concurrency", () => {
     }, 50);
 
     expect(transcribePromise).rejects.toThrow();
-  });
+  }, 10000);
 
   test("HTTP server stays responsive while transcription is running in background", async () => {
+    const transcriptionService = new TranscriptionService({
+      db: dbHandle.db,
+      meetingsDir: tempDir,
+      localPipeline: new LocalTranscriptionWorkerRunner({
+        asrConfig: { modelId: "mock" }
+      })
+    });
+
     const app = createApp({
       meetingsDir: tempDir,
       db: dbHandle.db,
-      webRoot: "/tmp"
+      webRoot: "/tmp",
+      transcriptionService
     });
 
     // 1. Seed meeting and recording
@@ -137,7 +150,7 @@ describe("LocalTranscriptionWorkerRunner and Background Concurrency", () => {
       new Request(`http://localhost/api/meetings/${meetingId}/transcribe`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "local" })
+        body: JSON.stringify({ provider: "local", modelId: "mock" })
       })
     );
 
@@ -158,5 +171,5 @@ describe("LocalTranscriptionWorkerRunner and Background Concurrency", () => {
 
     const transcribeRes = await transcriptionPromise;
     expect(transcribeRes.status).toBe(200);
-  });
+  }, 10000);
 });

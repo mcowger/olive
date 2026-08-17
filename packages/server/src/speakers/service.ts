@@ -21,10 +21,44 @@ import {
   encodeWav,
   loadAudioSamples,
   normalizeVector,
+  scoreAgainstTrustedVectors,
   SherpaSpeakerEmbeddingExtractor,
   type SpeakerEmbeddingExtractorInterface,
   type VoiceprintVector
 } from "../providers/local/index.ts";
+
+export const MAX_ENROLLMENT_CLIPS = 8;
+export const MIN_CONFIRM_DURATION_SEC = 3.0;
+export const MAX_CONFIRM_DURATION_SEC = 15.0;
+export const MAX_ENROLL_DURATION_SEC = 30.0;
+export const OUTLIER_MIN_SIMILARITY = 0.55;
+export const REDUNDANT_MAX_SIMILARITY = 0.95;
+
+export type VoiceprintEnrollmentStatus =
+  | "enrolled"
+  | "enrolled_evicted"
+  | "redundant_skipped"
+  | "outlier_rejected"
+  | "duration_skipped"
+  | "not_available";
+
+export interface AdoptVoiceprintOptions {
+  speakerRow: SpeakerRow;
+  samples: Float32Array;
+  sampleRate?: number;
+  clipFilename: string;
+  isAnchor?: boolean;
+  meetingId?: string;
+  segmentIndex?: number;
+}
+
+export interface AdoptVoiceprintResult {
+  status: VoiceprintEnrollmentStatus;
+  voiceprintEnrolled: boolean;
+  statusReason?: string;
+  similarity?: number;
+  updatedSpeakerRow: SpeakerRow;
+}
 
 export interface SpeakerServiceOptions {
   db: Kysely<Database>;
@@ -62,6 +96,8 @@ export interface ReassignMeetingSpeakerResult {
   transcript: Transcript;
   updatedSegmentsCount: number;
   extractedVoiceprintsCount: number;
+  voiceprintStatus?: VoiceprintEnrollmentStatus;
+  statusReason?: string;
 }
 
 export interface ConfirmMeetingSegmentSpeakerOptions {
@@ -76,6 +112,9 @@ export interface ConfirmMeetingSegmentSpeakerResult {
   transcript: Transcript;
   segmentIndex: number;
   voiceprintEnrolled: boolean;
+  voiceprintStatus: VoiceprintEnrollmentStatus;
+  statusReason?: string;
+  similarity?: number;
 }
 
 export interface UnassignMeetingSegmentSpeakerOptions {
@@ -224,6 +263,170 @@ export class SpeakerService {
     this.localEmbeddingExtractor = new SherpaSpeakerEmbeddingExtractor();
     this.logger = options.logger ?? defaultLogger;
     this.now = options.now ?? Date.now;
+  }
+
+  /**
+   * Adopts a speech sample into a speaker's trusted local voiceprint pool using
+   * the Protected Anchor + Diversity Cap policy:
+   * 1. Gating on duration ([3.0s, 15.0s] for confirmations, [3.0s, 30.0s] for anchor enrollment).
+   * 2. Outlier rejection: cosine similarity < 0.55 rejected as noise/crosstalk.
+   * 3. Redundancy check: cosine similarity > 0.95 skipped (already modeled).
+   * 4. Cap & Anchor Protection: max 8 clips total. When full, evicts oldest non-anchor clip (index 1).
+   */
+  private async adoptVoiceprintSample(
+    options: AdoptVoiceprintOptions
+  ): Promise<AdoptVoiceprintResult> {
+    const {
+      speakerRow,
+      samples,
+      sampleRate = 16000,
+      clipFilename,
+      isAnchor = false,
+      meetingId,
+      segmentIndex
+    } = options;
+    const currentTime = this.now();
+    const durationSec = samples.length / sampleRate;
+
+    // 1. Duration check
+    const minSec = MIN_CONFIRM_DURATION_SEC;
+    const maxSec = isAnchor ? MAX_ENROLL_DURATION_SEC : MAX_CONFIRM_DURATION_SEC;
+    if (durationSec < minSec || durationSec > maxSec) {
+      return {
+        status: "duration_skipped",
+        voiceprintEnrolled: false,
+        statusReason: `Duration (${durationSec.toFixed(1)}s) outside optimal window [${minSec.toFixed(1)}s - ${maxSec.toFixed(1)}s]`,
+        updatedSpeakerRow: speakerRow
+      };
+    }
+
+    // 2. Extract local neural embedding
+    let newEmbedding: VoiceprintVector;
+    try {
+      newEmbedding = await this.localEmbeddingExtractor.extract(samples, sampleRate);
+    } catch (err) {
+      this.logger.warn("Could not extract local voiceprint embedding", {
+        speakerId: speakerRow.id,
+        meetingId,
+        segmentIndex,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      return {
+        status: "not_available",
+        voiceprintEnrolled: false,
+        statusReason: "Local embedding extraction failed",
+        updatedSpeakerRow: speakerRow
+      };
+    }
+
+    const providerIds = parseJsonField<Record<string, string[]>>(speakerRow.provider_ids, {});
+    const clips = parseJsonField<string[]>(speakerRow.enrollment_clip_paths, []);
+    const localVectorStrs = providerIds.local ?? [];
+
+    const existingVectors: VoiceprintVector[] = localVectorStrs
+      .map((str) => {
+        try {
+          return JSON.parse(str) as VoiceprintVector;
+        } catch {
+          return [];
+        }
+      })
+      .filter((v) => Array.isArray(v) && v.length > 0);
+
+    // 3. Similarity check if existing vectors exist and not an explicit anchor enrollment
+    let similarity: number | undefined;
+    if (!isAnchor && existingVectors.length > 0) {
+      similarity = scoreAgainstTrustedVectors(newEmbedding, existingVectors);
+      if (similarity < OUTLIER_MIN_SIMILARITY) {
+        return {
+          status: "outlier_rejected",
+          voiceprintEnrolled: false,
+          similarity,
+          statusReason: `Similarity (${similarity.toFixed(3)}) is below outlier threshold (${OUTLIER_MIN_SIMILARITY})`,
+          updatedSpeakerRow: speakerRow
+        };
+      }
+
+      if (similarity > REDUNDANT_MAX_SIMILARITY) {
+        return {
+          status: "redundant_skipped",
+          voiceprintEnrolled: false,
+          similarity,
+          statusReason: `Similarity (${similarity.toFixed(3)}) exceeds redundancy threshold (${REDUNDANT_MAX_SIMILARITY})`,
+          updatedSpeakerRow: speakerRow
+        };
+      }
+    }
+
+    // 4. Save audio clip to disk
+    const speakerFolder = join(this.configDir, "speakers", speakerRow.id);
+    await mkdir(speakerFolder, { recursive: true });
+    const clipRelativePath = join("speakers", speakerRow.id, clipFilename);
+    const clipWavBytes = encodeWav(samples, sampleRate);
+    await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
+
+    let status: VoiceprintEnrollmentStatus = "enrolled";
+
+    // 5. Enforce Cap (Protected Anchor + Diversity Cap)
+    // If pool is at or above MAX_ENROLLMENT_CLIPS, evict oldest non-anchor clip (index 1)
+    if (clips.length >= MAX_ENROLLMENT_CLIPS) {
+      if (clips.length > 1) {
+        const evictedRelPath = clips.splice(1, 1)[0];
+        if (localVectorStrs.length > 1) {
+          localVectorStrs.splice(1, 1);
+        }
+        try {
+          const evictedFullPath = join(this.configDir, evictedRelPath);
+          if (existsSync(evictedFullPath)) {
+            await unlink(evictedFullPath);
+          }
+        } catch (err) {
+          this.logger.warn("Could not remove evicted confirmation clip", {
+            path: evictedRelPath,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+        status = "enrolled_evicted";
+      }
+    }
+
+    if (!clips.includes(clipRelativePath)) {
+      clips.push(clipRelativePath);
+    }
+    localVectorStrs.push(JSON.stringify(newEmbedding));
+    providerIds.local = localVectorStrs;
+
+    await this.db
+      .updateTable("speakers")
+      .set({
+        provider_ids: JSON.stringify(providerIds),
+        enrollment_clip_paths: JSON.stringify(clips),
+        enrolled_at: speakerRow.enrolled_at ?? currentTime
+      })
+      .where("id", "=", speakerRow.id)
+      .execute();
+
+    const updatedRow = await this.db
+      .selectFrom("speakers")
+      .selectAll()
+      .where("id", "=", speakerRow.id)
+      .executeTakeFirstOrThrow();
+
+    // Background Speechmatics enrollment if available and configured
+    if (this.client?.isConfigured && (!providerIds.speechmatics || providerIds.speechmatics.length === 0)) {
+      void this.enrollSpeechmaticsClipBackground(speakerRow.id, clipWavBytes, clipFilename);
+    }
+
+    return {
+      status,
+      voiceprintEnrolled: true,
+      similarity,
+      statusReason:
+        status === "enrolled_evicted"
+          ? "Enrolled new sample, evicted oldest non-anchor clip (cap reached)"
+          : "Enrolled new voiceprint sample",
+      updatedSpeakerRow: updatedRow
+    };
   }
 
   private async enrollSpeechmaticsClipBackground(
@@ -595,6 +798,27 @@ export class SpeakerService {
         }
       }
 
+      // Enforce cap: Protected Anchor + Diversity Cap (Max 8 clips)
+      if (cleanClips.length > MAX_ENROLLMENT_CLIPS) {
+        const anchor = cleanClips[0];
+        const otherClips = cleanClips.slice(1);
+        const keepCount = MAX_ENROLLMENT_CLIPS - 1;
+        const keptOthers = otherClips.slice(-keepCount);
+        const evictedOthers = otherClips.slice(0, -keepCount);
+
+        for (const evicted of evictedOthers) {
+          cleanedClipsCount++;
+          retainedClipsCount--;
+          try {
+            if (existsSync(evicted.fullPath)) {
+              await unlink(evicted.fullPath);
+            }
+          } catch {}
+        }
+        cleanClips.length = 0;
+        cleanClips.push(anchor, ...keptOthers);
+      }
+
       // Re-extract neural embeddings for all clean clips
       const trustedVectors: VoiceprintVector[] = [];
       for (const clip of cleanClips) {
@@ -740,9 +964,11 @@ export class SpeakerService {
     const { segments, isArrayFormat, language, durationMs, speakers } = extractTranscriptSegments(parsedData);
 
     // 3. Adopt voiceprints if requested
+    let voiceprintStatus: VoiceprintEnrollmentStatus | undefined;
+    let statusReason: string | undefined;
+
     if (adoptVoiceprint) {
       const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
-      const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
       let adoptedAny = false;
 
       // A. Adopt Speechmatics voiceprint identifiers
@@ -814,32 +1040,24 @@ export class SpeakerService {
                   offset += c.length;
                 }
 
-                const durationSec = mergedSamples.length / 16000;
+                const clipFilename = `clip_meeting_${meetingId}_${currentTime}.wav`;
+                const adoptResult = await this.adoptVoiceprintSample({
+                  speakerRow: targetSpeakerRow,
+                  samples: mergedSamples,
+                  sampleRate: 16000,
+                  clipFilename,
+                  isAnchor: false,
+                  meetingId,
+                  segmentIndex: options.segmentIndex
+                });
 
-                // Validate: only enroll if duration is between 3.0s and 30.0s
-                if (durationSec >= 3.0 && durationSec <= 30.0) {
-                  const newLocalEmbedding = await this.localEmbeddingExtractor.extract(mergedSamples, 16000);
-                  const localVectors = providerIds.local ?? [];
-                  localVectors.push(JSON.stringify(newLocalEmbedding));
-                  providerIds.local = localVectors;
+                voiceprintStatus = adoptResult.status;
+                statusReason = adoptResult.statusReason;
+
+                if (adoptResult.voiceprintEnrolled) {
                   extractedVoiceprintsCount++;
+                  targetSpeakerRow = adoptResult.updatedSpeakerRow;
                   adoptedAny = true;
-
-                  // Save audio clip
-                  const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
-                  await mkdir(speakerFolder, { recursive: true });
-                  const clipFilename = `clip_meeting_${meetingId}_${currentTime}.wav`;
-                  const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
-                  const clipWavBytes = encodeWav(mergedSamples, 16000);
-                  await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
-
-                  if (!clips.includes(clipRelativePath)) {
-                    clips.push(clipRelativePath);
-                  }
-
-                  if (this.client?.isConfigured && (!providerIds.speechmatics || providerIds.speechmatics.length === 0)) {
-                    void this.enrollSpeechmaticsClipBackground(targetSpeakerRow.id, clipWavBytes, clipFilename);
-                  }
                 }
               }
             }
@@ -852,13 +1070,24 @@ export class SpeakerService {
         }
       }
 
-      if (adoptedAny) {
+      if (extractedIds.length > 0) {
+        // Ensure Speechmatics IDs are saved if extracted from transcript
+        const currentTargetRow = await this.db
+          .selectFrom("speakers")
+          .selectAll()
+          .where("id", "=", targetSpeakerRow.id)
+          .executeTakeFirstOrThrow();
+        const curProviderIds = parseJsonField<Record<string, string[]>>(currentTargetRow.provider_ids, {});
+        const curSmSet = new Set(curProviderIds.speechmatics ?? []);
+        for (const id of extractedIds) {
+          curSmSet.add(id);
+        }
+        curProviderIds.speechmatics = Array.from(curSmSet);
         await this.db
           .updateTable("speakers")
           .set({
-            provider_ids: JSON.stringify(providerIds),
-            enrollment_clip_paths: JSON.stringify(clips),
-            enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
+            provider_ids: JSON.stringify(curProviderIds),
+            enrolled_at: currentTargetRow.enrolled_at ?? currentTime
           })
           .where("id", "=", targetSpeakerRow.id)
           .execute();
@@ -983,7 +1212,9 @@ export class SpeakerService {
       speaker: toSpeaker(targetSpeakerRow),
       transcript: updatedTranscript,
       updatedSegmentsCount,
-      extractedVoiceprintsCount
+      extractedVoiceprintsCount,
+      voiceprintStatus,
+      statusReason
     };
   }
 
@@ -1085,6 +1316,10 @@ export class SpeakerService {
     }
 
     let voiceprintEnrolled = false;
+    let voiceprintStatus: VoiceprintEnrollmentStatus = "not_available";
+    let statusReason: string | undefined;
+    let similarity: number | undefined;
+
     const recording = await this.db
       .selectFrom("recordings")
       .selectAll()
@@ -1105,46 +1340,24 @@ export class SpeakerService {
 
             if (sEnd > sStart) {
               const segSamples = fullSamples.subarray(sStart, sEnd);
-              const durationSec = segSamples.length / 16000;
+              const clipFilename = `clip_confirmed_meeting_${meetingId}_${segmentIndex}_${currentTime}.wav`;
+              const adoptResult = await this.adoptVoiceprintSample({
+                speakerRow: targetSpeakerRow,
+                samples: segSamples,
+                sampleRate: 16000,
+                clipFilename,
+                isAnchor: false,
+                meetingId,
+                segmentIndex
+              });
 
-              // Only add to trusted enrollment if duration is between 3.0s and 30.0s
-              if (durationSec >= 3.0 && durationSec <= 30.0) {
-                const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
-                const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
+              voiceprintEnrolled = adoptResult.voiceprintEnrolled;
+              voiceprintStatus = adoptResult.status;
+              statusReason = adoptResult.statusReason;
+              similarity = adoptResult.similarity;
 
-                const newEmbedding = await this.localEmbeddingExtractor.extract(segSamples, 16000);
-                const localVectors = providerIds.local ?? [];
-                localVectors.push(JSON.stringify(newEmbedding));
-                providerIds.local = localVectors;
-
-                const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
-                await mkdir(speakerFolder, { recursive: true });
-                const clipFilename = `clip_confirmed_meeting_${meetingId}_${segmentIndex}_${currentTime}.wav`;
-                const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
-                const clipWavBytes = encodeWav(segSamples, 16000);
-                await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
-
-                if (!clips.includes(clipRelativePath)) {
-                  clips.push(clipRelativePath);
-                }
-
-                await this.db
-                  .updateTable("speakers")
-                  .set({
-                    provider_ids: JSON.stringify(providerIds),
-                    enrollment_clip_paths: JSON.stringify(clips),
-                    enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
-                  })
-                  .where("id", "=", targetSpeakerRow.id)
-                  .execute();
-
-                targetSpeakerRow = await this.db
-                  .selectFrom("speakers")
-                  .selectAll()
-                  .where("id", "=", targetSpeakerRow.id)
-                  .executeTakeFirstOrThrow();
-
-                voiceprintEnrolled = true;
+              if (adoptResult.voiceprintEnrolled) {
+                targetSpeakerRow = adoptResult.updatedSpeakerRow;
               }
             }
           }
@@ -1193,7 +1406,10 @@ export class SpeakerService {
       speaker: toSpeaker(targetSpeakerRow),
       transcript: updatedTranscript,
       segmentIndex,
-      voiceprintEnrolled
+      voiceprintEnrolled,
+      voiceprintStatus,
+      statusReason,
+      similarity
     };
   }
 
@@ -1668,7 +1884,23 @@ export class SpeakerService {
       targetProviderIds.local = combinedLocal;
     }
 
-    const combinedClips = Array.from(new Set([...targetClips, ...sourceClips]));
+    let combinedClips = Array.from(new Set([...targetClips, ...sourceClips]));
+    if (combinedClips.length > MAX_ENROLLMENT_CLIPS) {
+      const anchor = combinedClips[0];
+      const otherClips = combinedClips.slice(1);
+      const keepCount = MAX_ENROLLMENT_CLIPS - 1;
+      const keptOthers = otherClips.slice(-keepCount);
+      const evictedOthers = otherClips.slice(0, -keepCount);
+      for (const evictedRel of evictedOthers) {
+        try {
+          const evictedFull = join(this.configDir, evictedRel);
+          if (existsSync(evictedFull)) {
+            await unlink(evictedFull);
+          }
+        } catch {}
+      }
+      combinedClips = [anchor, ...keptOthers];
+    }
     const enrolledAt = target.enrolled_at || source.enrolled_at || null;
 
     await this.db
@@ -1793,6 +2025,27 @@ export class SpeakerService {
     const existingClips = speakerRow
       ? parseJsonField<string[]>(speakerRow.enrollment_clip_paths, [])
       : [];
+    const existingLocal = existingProviderIds.local ?? [];
+
+    if (existingClips.length >= MAX_ENROLLMENT_CLIPS) {
+      if (existingClips.length > 1) {
+        const evictedRel = existingClips.splice(1, 1)[0];
+        if (existingLocal.length > 1) {
+          existingLocal.splice(1, 1);
+        }
+        try {
+          const evictedFull = join(this.configDir, evictedRel);
+          if (existsSync(evictedFull)) {
+            await unlink(evictedFull);
+          }
+        } catch (err) {
+          this.logger.warn("Could not delete evicted enrollment clip", {
+            path: evictedRel,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+      }
+    }
 
     if (!existingClips.includes(clipRelativePath)) {
       existingClips.push(clipRelativePath);
@@ -1804,7 +2057,6 @@ export class SpeakerService {
     if (providerMode === "local" || providerMode === "both") {
       try {
         const localEmbedding = await this.localEmbeddingExtractor.extract(decoded.samples, 16000);
-        const existingLocal = existingProviderIds.local ?? [];
         existingLocal.push(JSON.stringify(localEmbedding));
         existingProviderIds.local = existingLocal;
       } catch (err) {

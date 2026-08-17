@@ -460,4 +460,221 @@ describe("SpeakerService & Speaker Registry", () => {
     await rm(configDir, { recursive: true, force: true });
     await rm(meetingsDir, { recursive: true, force: true });
   });
+
+  test("enforces Protected Anchor + Diversity Cap (max 8 clips) on segment confirmation", async () => {
+    const handle = createDb(":memory:");
+    const configDir = await mkdtemp(join(import.meta.dir, "speaker-cap-cfg-"));
+    const meetingsDir = await mkdtemp(join(import.meta.dir, "speaker-cap-mtg-"));
+    let now = 1_700_000_000_000;
+    const meetingId = "m-cap-test";
+
+    const service = new SpeakerService({
+      db: handle.db,
+      configDir,
+      meetingsDir,
+      now: () => now++
+    });
+
+    // 1. Initial Anchor Enrollment for Alice (4.0s voice tone)
+    const numSamples = 16000 * 4;
+    const anchorSamples = new Float32Array(numSamples);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / 16000;
+      anchorSamples[i] = 0.5 * Math.sin(2 * Math.PI * 220 * t) + 0.25 * Math.sin(2 * Math.PI * 440 * t) + 0.1 * Math.sin(2 * Math.PI * 660 * t);
+    }
+    const anchorWav = encodeWav(anchorSamples, 16000);
+
+    const initialSpeaker = await service.enrollSpeaker({
+      name: "Alice",
+      audioBytes: anchorWav,
+      provider: "local"
+    });
+
+    expect(initialSpeaker.enrollmentClipPaths).toHaveLength(1);
+    const anchorPath = initialSpeaker.enrollmentClipPaths[0];
+
+    // 2. Set up a meeting recording with 12 segments of 4.0s each (same voice with subtle acoustic variation)
+    const totalSec = 60;
+    const meetingSamples = new Float32Array(16000 * totalSec);
+    for (let i = 0; i < meetingSamples.length; i++) {
+      const t = i / 16000;
+      const segIdx = Math.floor(t / 4.5);
+      // Variations in pitch and formants to simulate natural continuous speech
+      const baseFreq = 220 + ((segIdx + 1) * 3.5);
+      const harmonic2 = 0.25 + ((segIdx + 1) * 0.03);
+      const harmonic3 = 0.08 + ((segIdx + 1) * 0.015);
+      meetingSamples[i] = 0.5 * Math.sin(2 * Math.PI * baseFreq * t) + harmonic2 * Math.sin(2 * Math.PI * (baseFreq * 2) * t) + harmonic3 * Math.sin(2 * Math.PI * (baseFreq * 3) * t);
+    }
+    const meetingWav = encodeWav(meetingSamples, 16000);
+
+    const paths = meetingPaths(meetingsDir, 1_700_000_000_000, "Cap Test Meeting", meetingId);
+    await mkdir(paths.audioDir, { recursive: true });
+    await mkdir(paths.transcriptsDir, { recursive: true });
+    await writeFile(join(paths.folder, "audio/meeting.wav"), meetingWav);
+
+    const segments = [];
+    for (let i = 0; i < 10; i++) {
+      segments.push({
+        startMs: i * 4500,
+        endMs: i * 4500 + 4000,
+        speaker: "Speaker 1",
+        text: `Segment ${i}`
+      });
+    }
+
+    const transcriptData = { language: "en", durationMs: totalSec * 1000, segments };
+    await writeFile(join(paths.folder, "transcripts/local.json"), JSON.stringify(transcriptData, null, 2), "utf8");
+    await writeFile(join(paths.folder, "transcripts/local.txt"), "Transcript content", "utf8");
+
+    await handle.db
+      .insertInto("meetings")
+      .values({
+        id: meetingId,
+        title: "Cap Test Meeting",
+        start_time: 1_700_000_000_000,
+        end_time: 1_700_000_000_000 + totalSec * 1000,
+        source: "upload",
+        status: "ready",
+        tags: "[]",
+        primary_transcript_artifact_id: null,
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_000_000_000
+      })
+      .execute();
+
+    await handle.db
+      .insertInto("recordings")
+      .values({
+        id: "rec-cap-1",
+        meeting_id: meetingId,
+        path: "audio/meeting.wav",
+        mime: "audio/wav",
+        duration_ms: totalSec * 1000,
+        size_bytes: meetingWav.byteLength,
+        sha256: "fake-sha-cap",
+        provider: "upload",
+        provider_recording_id: null,
+        created_at: 1_700_000_000_000
+      })
+      .execute();
+
+    await handle.db
+      .insertInto("artifacts")
+      .values([
+        {
+          id: "art-cap-json",
+          meeting_id: meetingId,
+          recording_id: "rec-cap-1",
+          kind: "transcript",
+          provider: "local",
+          format: "json",
+          path: "transcripts/local.json",
+          created_at: 1_700_000_000_000
+        },
+        {
+          id: "art-cap-txt",
+          meeting_id: meetingId,
+          recording_id: "rec-cap-1",
+          kind: "transcript",
+          provider: "local",
+          format: "txt",
+          path: "transcripts/local.txt",
+          created_at: 1_700_000_000_000
+        }
+      ])
+      .execute();
+
+    await handle.db
+      .updateTable("meetings")
+      .set({ primary_transcript_artifact_id: "art-cap-json" })
+      .where("id", "=", meetingId)
+      .execute();
+
+    // 3. Confirm segments 0 through 6 (which brings total clips to 8 = 1 anchor + 7 confirmed)
+    for (let i = 0; i < 7; i++) {
+      const res = await service.confirmMeetingSegmentSpeaker({
+        meetingId,
+        segmentIndex: i,
+        speakerId: initialSpeaker.id
+      });
+      expect(res.voiceprintEnrolled).toBe(true);
+      expect(res.voiceprintStatus).toBe("enrolled");
+    }
+
+    let updatedSpeaker = (await service.getSpeaker(initialSpeaker.id))!.speaker;
+    expect(updatedSpeaker.enrollmentClipPaths).toHaveLength(8);
+    expect(updatedSpeaker.enrollmentClipPaths[0]).toBe(anchorPath); // Anchor preserved
+    const clip1Path = updatedSpeaker.enrollmentClipPaths[1];
+
+    // 4. Confirm segment 7 (9th total sample) -> Cap of 8 reached: oldest non-anchor clip (clip 1) is evicted
+    const res8 = await service.confirmMeetingSegmentSpeaker({
+      meetingId,
+      segmentIndex: 7,
+      speakerId: initialSpeaker.id
+    });
+
+    expect(res8.voiceprintEnrolled).toBe(true);
+    expect(res8.voiceprintStatus).toBe("enrolled_evicted");
+
+    updatedSpeaker = (await service.getSpeaker(initialSpeaker.id))!.speaker;
+    expect(updatedSpeaker.enrollmentClipPaths).toHaveLength(8);
+    expect(updatedSpeaker.enrollmentClipPaths[0]).toBe(anchorPath); // Anchor MUST still be index 0
+    expect(updatedSpeaker.enrollmentClipPaths).not.toContain(clip1Path); // Oldest non-anchor clip was evicted
+    expect(existsSync(join(configDir, clip1Path))).toBe(false); // Evicted file was unlinked from disk
+
+    // 5. Test duration gating: confirm short segment (< 3.0s)
+    const shortSegIdx = 8;
+    transcriptData.segments[shortSegIdx] = {
+      startMs: 36000,
+      endMs: 37500, // 1.5s duration
+      speaker: "Speaker 1",
+      text: "Too short segment"
+    };
+    await writeFile(join(paths.folder, "transcripts/local.json"), JSON.stringify(transcriptData, null, 2), "utf8");
+
+    const shortRes = await service.confirmMeetingSegmentSpeaker({
+      meetingId,
+      segmentIndex: shortSegIdx,
+      speakerId: initialSpeaker.id
+    });
+    expect(shortRes.voiceprintEnrolled).toBe(false);
+    expect(shortRes.voiceprintStatus).toBe("duration_skipped");
+    expect(shortRes.transcript.segments[shortSegIdx].verified).toBe(true); // Transcript verified anyway
+
+    // 6. Test redundancy check: re-confirming identical audio slice is skipped as redundant
+    const redundantRes = await service.confirmMeetingSegmentSpeaker({
+      meetingId,
+      segmentIndex: 7, // exact same segment as confirmed above in step 4
+      speakerId: initialSpeaker.id
+    });
+    expect(redundantRes.voiceprintEnrolled).toBe(false);
+    expect(redundantRes.voiceprintStatus).toBe("redundant_skipped");
+
+    // 7. Test rebuildSpeakerProfiles prunes oversized profiles to 8 clips and cleans disk
+    // Manually add dummy clips to test pruning
+    const dummyClips = [...updatedSpeaker.enrollmentClipPaths];
+    for (let d = 0; d < 5; d++) {
+      const dummyRel = `speakers/${initialSpeaker.id}/dummy_${d}.wav`;
+      await writeFile(join(configDir, dummyRel), anchorWav);
+      dummyClips.push(dummyRel);
+    }
+    await handle.db
+      .updateTable("speakers")
+      .set({ enrollment_clip_paths: JSON.stringify(dummyClips) })
+      .where("id", "=", initialSpeaker.id)
+      .execute();
+
+    const rebuildResult = await service.rebuildSpeakerProfiles({ speakerId: initialSpeaker.id });
+    expect(rebuildResult.cleanedClipsCount).toBeGreaterThanOrEqual(5);
+    expect(rebuildResult.retainedClipsCount).toBe(8);
+
+    const postRebuildSpeaker = (await service.getSpeaker(initialSpeaker.id))!.speaker;
+    expect(postRebuildSpeaker.enrollmentClipPaths).toHaveLength(8);
+    expect(postRebuildSpeaker.enrollmentClipPaths[0]).toBe(anchorPath);
+
+    await handle.db.destroy();
+    handle.sqlite.close();
+    await rm(configDir, { recursive: true, force: true });
+    await rm(meetingsDir, { recursive: true, force: true });
+  });
 });

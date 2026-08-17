@@ -825,7 +825,7 @@ function MeetingDetailView({
   const [cancellingTranscription, setCancellingTranscription] = useState(false);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionProgressUpdate | null>(null);
   const transcriptionAbortRef = useRef<AbortController | null>(null);
-  const [selectedEngine, setSelectedEngine] = useState<string>("local:qwen");
+  const [selectedEngine, setSelectedEngine] = useState<string>("local:cohere");
   const [showDiarizationSettings, setShowDiarizationSettings] = useState(false);
   const [customClusteringThreshold, setCustomClusteringThreshold] = useState(0.85);
   const [customSimilarityThreshold, setCustomSimilarityThreshold] = useState(0.85);
@@ -837,6 +837,7 @@ function MeetingDetailView({
   const [summaryViewMode, setSummaryViewMode] = useState<"rendered" | "raw">("rendered");
   const [regenerating, setRegenerating] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [confirmationNotice, setConfirmationNotice] = useState<string | null>(null);
   const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
   const playbackStopMsRef = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -867,12 +868,10 @@ function MeetingDetailView({
         const cfg = await cfgRes.json();
         if (cfg.localClusteringThreshold !== undefined) setCustomClusteringThreshold(cfg.localClusteringThreshold);
         if (cfg.localSimilarityThreshold !== undefined) setCustomSimilarityThreshold(cfg.localSimilarityThreshold);
-        if (cfg.localAsrModel?.includes("granite")) {
-          setSelectedEngine("local:granite");
-        } else if (cfg.localAsrModel?.includes("cohere")) {
-          setSelectedEngine("local:cohere");
-        } else {
+        if (cfg.localAsrModel?.includes("qwen")) {
           setSelectedEngine("local:qwen");
+        } else {
+          setSelectedEngine("local:cohere");
         }
       }
     } catch (err) {
@@ -986,11 +985,9 @@ function MeetingDetailView({
     });
 
     const isLocal = selectedEngine.startsWith("local");
-    const modelId = selectedEngine === "local:granite"
-      ? "onnx-community/granite-4.0-1b-speech-ONNX"
-      : selectedEngine === "local:cohere"
-      ? "onnx-community/cohere-transcribe-03-2026-ONNX"
-      : "ggml-org/Qwen3-ASR-1.7B-GGUF";
+    const modelId = selectedEngine === "local:qwen"
+      ? "ggml-org/Qwen3-ASR-1.7B-GGUF"
+      : "onnx-community/cohere-transcribe-03-2026-ONNX";
 
     try {
       const res = await fetch(`/api/meetings/${meetingId}/transcribe?stream=true`, {
@@ -1149,6 +1146,27 @@ function MeetingDetailView({
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${res.status}`);
       }
+      const data = (await res.json().catch(() => ({}))) as {
+        voiceprintStatus?: string;
+        statusReason?: string;
+        speaker?: { name: string };
+      };
+
+      if (data.voiceprintStatus === "enrolled") {
+        setConfirmationNotice(`✓ Confirmed "${data.speaker?.name || "speaker"}" & enrolled voiceprint sample`);
+      } else if (data.voiceprintStatus === "enrolled_evicted") {
+        setConfirmationNotice(`✓ Confirmed "${data.speaker?.name || "speaker"}" (pool full: rotated oldest confirmed clip)`);
+      } else if (data.voiceprintStatus === "redundant_skipped") {
+        setConfirmationNotice(`✓ Confirmed "${data.speaker?.name || "speaker"}" (profile already optimal — redundant audio skipped)`);
+      } else if (data.voiceprintStatus === "outlier_rejected") {
+        setConfirmationNotice(`✓ Confirmed "${data.speaker?.name || "speaker"}" in transcript (voiceprint skipped: acoustic mismatch/noise)`);
+      } else if (data.voiceprintStatus === "duration_skipped") {
+        setConfirmationNotice(`✓ Confirmed "${data.speaker?.name || "speaker"}" in transcript (voiceprint skipped: clip outside 3–15s window)`);
+      } else {
+        setConfirmationNotice(`✓ Confirmed "${data.speaker?.name || "speaker"}"`);
+      }
+      setTimeout(() => setConfirmationNotice(null), 4000);
+
       await fetchDetail();
       onSpeakerUpdated();
     } catch (err) {
@@ -1284,9 +1302,8 @@ function MeetingDetailView({
                 onChange={(e) => setSelectedEngine(e.target.value)}
                 className="rounded-lg border border-stone-800 bg-stone-900 px-3 py-2 text-xs text-stone-200 focus:border-lime-400 focus:outline-none max-w-full"
               >
-                <option value="local:qwen">Local (Qwen3-ASR 1.7B + Diarization) (Default)</option>
-                <option value="local:granite">Local (IBM Granite Speech + Diarization)</option>
-                <option value="local:cohere">Local (Cohere Transcribe + Diarization)</option>
+                <option value="local:cohere">Local (Cohere Transcribe + Diarization) (Default)</option>
+                <option value="local:qwen">Local (Qwen3-ASR 1.7B + Diarization)</option>
                 <option value="speechmatics">Speechmatics (Cloud)</option>
               </select>
 
@@ -1358,9 +1375,7 @@ function MeetingDetailView({
                     <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-lime-400"></span>
                   </span>
                   <span className="font-semibold text-stone-200 uppercase tracking-wide">
-                    {selectedEngine === "local:granite"
-                      ? "Local Pipeline (IBM Granite Speech + Diarization)"
-                      : selectedEngine === "local:qwen"
+                    {selectedEngine === "local:qwen"
                       ? "Local Pipeline (Qwen3-ASR 1.7B + Diarization)"
                       : selectedEngine === "local:cohere"
                       ? "Local Pipeline (Cohere Transcribe + Diarization)"
@@ -1725,7 +1740,14 @@ function MeetingDetailView({
 
           {/* Transcript Viewer */}
           <section className="space-y-4 w-full max-w-full min-w-0">
-            <h2 className="text-xl font-semibold tracking-tight">Transcript</h2>
+            <div className="flex items-center justify-between gap-4">
+              <h2 className="text-xl font-semibold tracking-tight">Transcript</h2>
+              {confirmationNotice && (
+                <div className="rounded-lg border border-lime-500/40 bg-lime-500/10 px-3 py-1 text-xs font-medium text-lime-300 animate-fade-in">
+                  {confirmationNotice}
+                </div>
+              )}
+            </div>
 
             {parsedTranscriptSegments.length > 0 ? (
               <div className="space-y-3 sm:space-y-4 rounded-xl border border-stone-800 bg-stone-900/60 p-3 sm:p-6 w-full max-w-full min-w-0">
@@ -2587,7 +2609,7 @@ function UploadAudioModal({
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [autoTranscribe, setAutoTranscribe] = useState(true);
-  const [selectedEngine, setSelectedEngine] = useState<string>("local:qwen");
+  const [selectedEngine, setSelectedEngine] = useState<string>("local:cohere");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -2622,11 +2644,9 @@ function UploadAudioModal({
     if (isLocal) {
       formData.append(
         "modelId",
-        selectedEngine === "local:granite"
-          ? "onnx-community/granite-4.0-1b-speech-ONNX"
-          : selectedEngine === "local:cohere"
-          ? "onnx-community/cohere-transcribe-03-2026-ONNX"
-          : "ggml-org/Qwen3-ASR-1.7B-GGUF"
+        selectedEngine === "local:qwen"
+          ? "ggml-org/Qwen3-ASR-1.7B-GGUF"
+          : "onnx-community/cohere-transcribe-03-2026-ONNX"
       );
     }
 
@@ -2716,9 +2736,8 @@ function UploadAudioModal({
                   onChange={(e) => setSelectedEngine(e.target.value)}
                   className="w-full rounded border border-stone-700 bg-stone-900 px-2 py-1 text-xs text-stone-200"
                 >
-                  <option value="local:qwen">Local: Qwen3-ASR 1.7B (GGUF + Diarizer) (Default)</option>
-                  <option value="local:granite">Local: IBM Granite Speech (ONNX + Diarizer)</option>
-                  <option value="local:cohere">Local: Cohere Transcribe (ONNX + Diarizer)</option>
+                  <option value="local:cohere">Local: Cohere Transcribe (ONNX + Diarizer) (Default)</option>
+                  <option value="local:qwen">Local: Qwen3-ASR 1.7B (GGUF + Diarizer)</option>
                   <option value="speechmatics">Speechmatics (Cloud API)</option>
                 </select>
               </div>
@@ -2895,8 +2914,23 @@ function SpeakersListView({
                     )}
                     <div className="flex flex-col gap-1 items-end">
                       {hasLocalVoiceprint && (
-                        <span className="rounded-full px-2 py-0.5 text-[10px] font-medium bg-lime-400/10 text-lime-300 border border-lime-400/20">
-                          Local Vector Active
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium border ${
+                            (s.enrollmentClipPaths?.length ?? 0) >= 8
+                              ? "bg-lime-400/20 text-lime-300 border-lime-400/40 font-semibold"
+                              : (s.enrollmentClipPaths?.length ?? 0) >= 5
+                              ? "bg-lime-400/15 text-lime-300 border-lime-400/30"
+                              : "bg-lime-400/10 text-lime-400 border-lime-400/20"
+                          }`}
+                          title={
+                            (s.enrollmentClipPaths?.length ?? 0) >= 8
+                              ? "Profile optimal (8/8 clips enrolled with anchor protection)"
+                              : `${s.enrollmentClipPaths?.length ?? 1}/8 voiceprint clips enrolled`
+                          }
+                        >
+                          {(s.enrollmentClipPaths?.length ?? 0) >= 8
+                            ? "Profile Optimal (8/8)"
+                            : `Enrolled (${s.enrollmentClipPaths?.length ?? 1}/8)`}
                         </span>
                       )}
                       {hasSmVoiceprint && (
@@ -2915,7 +2949,12 @@ function SpeakersListView({
                   <div className="mt-3 space-y-1 text-xs text-stone-400">
                     <p>Participated in: <span className="font-semibold text-stone-200">{s.meetingCount} meeting(s)</span></p>
                     {s.enrollmentClipPaths?.length > 0 && (
-                      <p>Stored clips: <span className="font-semibold text-stone-300">{s.enrollmentClipPaths.length}</span></p>
+                      <p>
+                        Stored clips: <span className="font-semibold text-stone-300">{s.enrollmentClipPaths.length}/8</span>
+                        {s.enrollmentClipPaths.length >= 8 && (
+                          <span className="text-stone-500 ml-1">(Cap reached — auto-rolling)</span>
+                        )}
+                      </p>
                     )}
                     {s.enrolledAt && (
                       <p>Last learned: {formatDate(s.enrolledAt)}</p>
@@ -3466,7 +3505,7 @@ function LlmSettingsModal({
   const [baseUrl, setBaseUrl] = useState<string>("");
   const [localClusteringThreshold, setLocalClusteringThreshold] = useState<number>(0.85);
   const [localSimilarityThreshold, setLocalSimilarityThreshold] = useState<number>(0.85);
-  const [localAsrModel, setLocalAsrModel] = useState<string>("ggml-org/Qwen3-ASR-1.7B-GGUF");
+  const [localAsrModel, setLocalAsrModel] = useState<string>("onnx-community/cohere-transcribe-03-2026-ONNX");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshingCatalog, setRefreshingCatalog] = useState(false);
@@ -3818,14 +3857,11 @@ function LlmSettingsModal({
                   onChange={(e) => setLocalAsrModel(e.target.value)}
                   className="w-full rounded-lg border border-stone-700 bg-stone-900 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none"
                 >
-                  <option value="ggml-org/Qwen3-ASR-1.7B-GGUF">
-                    Qwen3-ASR 1.7B (Default — Fast & Multilingual GGUF/Vulkan)
-                  </option>
-                  <option value="onnx-community/granite-4.0-1b-speech-ONNX">
-                    IBM Granite Speech 4.0 1B (ONNX CPU Quantized)
-                  </option>
                   <option value="onnx-community/cohere-transcribe-03-2026-ONNX">
-                    Cohere Transcribe (03-2026 ONNX)
+                    Cohere Transcribe (03-2026 ONNX) (Default)
+                  </option>
+                  <option value="ggml-org/Qwen3-ASR-1.7B-GGUF">
+                    Qwen3-ASR 1.7B (Fast & Multilingual GGUF/Vulkan)
                   </option>
                 </select>
               </div>

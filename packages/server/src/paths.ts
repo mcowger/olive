@@ -5,6 +5,7 @@ export interface OlivePaths {
   configDir: string;
   meetingsDir: string;
   backupsDir: string;
+  modelsDir: string;
   databasePath: string;
   settingsPath: string;
   plaudTokensPath: string;
@@ -30,12 +31,14 @@ export function resolvePaths(
   const configDir = resolve(env.OLIVE_CONFIG_DIR || defaultConfigDir(platform, homeDir, env));
   const meetingsDir = resolve(env.OLIVE_MEETINGS_DIR || join(configDir, "meetings"));
   const backupsDir = resolve(env.OLIVE_BACKUPS_DIR || join(configDir, "backups"));
+  const modelsDir = resolve(env.OLIVE_MODELS_DIR || join(configDir, "models"));
   const plaudTokensPath = resolve(env.PLAUD_TOKEN_PATH || join(configDir, "plaud-tokens.json"));
 
   return {
     configDir,
     meetingsDir,
     backupsDir,
+    modelsDir,
     databasePath: join(configDir, "olive.sqlite"),
     settingsPath: join(configDir, "settings.json"),
     plaudTokensPath

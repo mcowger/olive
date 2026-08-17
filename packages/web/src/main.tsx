@@ -861,40 +861,57 @@ function MeetingDetailView({
         const decoder = new TextDecoder();
         let buffer = "";
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-          const blocks = buffer.split("\n\n");
-          buffer = blocks.pop() || "";
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() || "";
 
-          for (const block of blocks) {
-            const lines = block.split("\n");
-            let event = "message";
-            let dataStr = "";
+            for (const block of blocks) {
+              const lines = block.split("\n");
+              let event = "message";
+              let dataStr = "";
 
-            for (const line of lines) {
-              if (line.startsWith("event:")) {
-                event = line.replace(/^event:\s*/, "").trim();
-              } else if (line.startsWith("data:")) {
-                dataStr += line.replace(/^data:\s*/, "").trim();
+              for (const line of lines) {
+                if (line.startsWith("event:")) {
+                  event = line.replace(/^event:\s*/, "").trim();
+                } else if (line.startsWith("data:")) {
+                  dataStr += line.replace(/^data:\s*/, "").trim();
+                }
+              }
+
+              if (event === "ping") continue;
+
+              if (dataStr) {
+                try {
+                  const data = JSON.parse(dataStr);
+                  if (event === "progress" || event === "result") {
+                    setTranscriptionProgress(data);
+                  } else if (event === "error") {
+                    setError(data.error || data.message || "Transcription failed");
+                  }
+                } catch {
+                  // ignore partial JSON
+                }
               }
             }
-
-            if (dataStr) {
-              try {
-                const data = JSON.parse(dataStr);
-                if (event === "progress" || event === "result") {
-                  setTranscriptionProgress(data);
-                } else if (event === "error") {
-                  throw new Error(data.error || data.message || "Transcription failed");
-                }
-              } catch (e) {
-                if (e instanceof Error && e.message !== "Unexpected end of JSON input") {
-                  // ignore partial JSON parse errors
-                }
-              }
+          }
+        } catch (streamErr) {
+          // If stream disconnected while backend is still processing, poll meeting status
+          console.warn("SSE stream interrupted, falling back to status polling...", streamErr);
+          setTranscriptionProgress({
+            stage: "transcribing",
+            percent: 60,
+            message: "Finalizing transcription on server..."
+          });
+          for (let i = 0; i < 30; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const check = await fetch(`/api/meetings/${meetingId}`).then((r) => r.json()).catch(() => null);
+            if (check?.meeting?.status === "ready" || check?.transcriptContent) {
+              break;
             }
           }
         }

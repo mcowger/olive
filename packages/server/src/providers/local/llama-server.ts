@@ -203,6 +203,21 @@ export class LlamaServerManager {
     const baseStartMs = options.startMs ?? 0;
     const durationMs = Math.round((samples.length / sampleRate) * 1000);
 
+    const language = options.language || "en";
+    const isEnglish = language.toLowerCase().startsWith("en");
+
+    const systemPrompt = isEnglish
+      ? "You are an accurate English speech-to-text transcriber. Transcribe the speech verbatim in English only. Do not output non-English characters."
+      : `You are an accurate speech-to-text transcriber. Transcribe the speech verbatim in ${language}.`;
+
+    const userPrompt = isEnglish
+      ? "Language: English. Transcribe speech in English:"
+      : `Language: ${language}. Transcribe speech:`;
+
+    const assistantPrefill = isEnglish
+      ? "language English<asr_text>"
+      : `language ${language}<asr_text>`;
+
     const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -210,11 +225,19 @@ export class LlamaServerManager {
         model: this.modelRepo,
         messages: [
           {
+            role: "system",
+            content: systemPrompt
+          },
+          {
             role: "user",
             content: [
-              { type: "text", text: "transcribe the speech into a written format?" },
+              { type: "text", text: userPrompt },
               { type: "input_audio", input_audio: { data: b64, format: "wav" } }
             ]
+          },
+          {
+            role: "assistant",
+            content: assistantPrefill
           }
         ],
         temperature: 0.0,
@@ -234,7 +257,16 @@ export class LlamaServerManager {
     rawContent = rawContent.replace(/^language\s+[a-zA-Z-]+\s*/i, "");
     rawContent = rawContent.replace(/<asr_text>/gi, "");
     rawContent = rawContent.replace(/<\/asr_text>/gi, "");
-    const cleanText = rawContent.trim();
+
+    if (isEnglish) {
+      // Strip any residual non-Latin script characters (e.g. Devanagari, CJK, Arabic, Cyrillic) produced during hesitations or multilingual leaks
+      rawContent = rawContent.replace(/[^\u0000-\u007F\u00C0-\u024F\u2000-\u206F\u2E00-\u2E7F]+/g, " ");
+    }
+
+    const cleanText = rawContent
+      .replace(/\s+/g, " ")
+      .replace(/\s+([.,!?;:])/g, "$1")
+      .trim();
 
     const wordList = cleanText.split(/\s+/).filter(Boolean);
     const wordDuration = Math.floor(durationMs / Math.max(1, wordList.length));

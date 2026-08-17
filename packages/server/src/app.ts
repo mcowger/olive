@@ -392,6 +392,15 @@ export function createApp(options: AppOptions = {}): Hono {
 
       if (wantsStream) {
         return streamSSE(c, async (stream) => {
+          const pingInterval = setInterval(() => {
+            try {
+              void stream.writeSSE({
+                event: "ping",
+                data: "{}"
+              });
+            } catch {}
+          }, 3000);
+
           try {
             await stream.writeSSE({
               event: "progress",
@@ -441,6 +450,8 @@ export function createApp(options: AppOptions = {}): Hono {
                 error: err instanceof Error ? err.message : String(err)
               })
             });
+          } finally {
+            clearInterval(pingInterval);
           }
         });
       }

@@ -768,7 +768,7 @@ function MeetingDetailView({
   const [error, setError] = useState<string | null>(null);
   const [transcribing, setTranscribing] = useState(false);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionProgressUpdate | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<"local" | "speechmatics">("local");
+  const [selectedEngine, setSelectedEngine] = useState<string>("local:granite");
   const [showDiarizationSettings, setShowDiarizationSettings] = useState(false);
   const [customClusteringThreshold, setCustomClusteringThreshold] = useState(0.85);
   const [customSimilarityThreshold, setCustomSimilarityThreshold] = useState(0.85);
@@ -799,6 +799,13 @@ function MeetingDetailView({
         const cfg = await cfgRes.json();
         if (cfg.localClusteringThreshold !== undefined) setCustomClusteringThreshold(cfg.localClusteringThreshold);
         if (cfg.localSimilarityThreshold !== undefined) setCustomSimilarityThreshold(cfg.localSimilarityThreshold);
+        if (cfg.localAsrModel?.includes("qwen")) {
+          setSelectedEngine("local:qwen");
+        } else if (cfg.localAsrModel?.includes("cohere")) {
+          setSelectedEngine("local:cohere");
+        } else if (cfg.localAsrModel?.includes("granite")) {
+          setSelectedEngine("local:granite");
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load meeting");
@@ -819,6 +826,13 @@ function MeetingDetailView({
       message: "Starting transcription pipeline..."
     });
 
+    const isLocal = selectedEngine.startsWith("local");
+    const modelId = selectedEngine === "local:qwen"
+      ? "tonythethompson/Qwen3-ASR-1.7B-ONNX"
+      : selectedEngine === "local:cohere"
+      ? "onnx-community/cohere-transcribe-03-2026-ONNX"
+      : "onnx-community/granite-4.0-1b-speech-ONNX";
+
     try {
       const res = await fetch(`/api/meetings/${meetingId}/transcribe?stream=true`, {
         method: "POST",
@@ -827,11 +841,12 @@ function MeetingDetailView({
           "accept": "text/event-stream"
         },
         body: JSON.stringify({
-          provider: selectedProvider,
+          provider: isLocal ? "local" : "speechmatics",
+          modelId: isLocal ? modelId : undefined,
           poll: true,
           force: true,
-          clusteringThreshold: selectedProvider === "local" ? customClusteringThreshold : undefined,
-          similarityThreshold: selectedProvider === "local" ? customSimilarityThreshold : undefined
+          clusteringThreshold: isLocal ? customClusteringThreshold : undefined,
+          similarityThreshold: isLocal ? customSimilarityThreshold : undefined
         })
       });
 
@@ -1010,15 +1025,17 @@ function MeetingDetailView({
             <div className="flex flex-col sm:flex-row items-end sm:items-center gap-3">
               <div className="flex items-center gap-2">
                 <select
-                  value={selectedProvider}
-                  onChange={(e) => setSelectedProvider(e.target.value as "local" | "speechmatics")}
+                  value={selectedEngine}
+                  onChange={(e) => setSelectedEngine(e.target.value)}
                   className="rounded-lg border border-stone-800 bg-stone-900 px-3 py-2 text-xs text-stone-200 focus:border-lime-400 focus:outline-none"
                 >
-                  <option value="local">Local SOTA (Cohere 2B + Diarization)</option>
+                  <option value="local:granite">Local (IBM Granite Speech + Diarization)</option>
+                  <option value="local:qwen">Local (Qwen3-ASR 1.7B + Diarization)</option>
+                  <option value="local:cohere">Local (Cohere Transcribe + Diarization)</option>
                   <option value="speechmatics">Speechmatics (Cloud)</option>
                 </select>
 
-                {selectedProvider === "local" && (
+                {selectedEngine.startsWith("local") && (
                   <button
                     type="button"
                     onClick={() => setShowDiarizationSettings(!showDiarizationSettings)}
@@ -1071,7 +1088,13 @@ function MeetingDetailView({
                     <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-lime-400"></span>
                   </span>
                   <span className="font-semibold text-stone-200 uppercase tracking-wide">
-                    {selectedProvider === "local" ? "Local SOTA Pipeline (Cohere 2B + VAD)" : "Speechmatics Cloud"}
+                    {selectedEngine === "local:granite"
+                      ? "Local Pipeline (IBM Granite Speech + Diarization)"
+                      : selectedEngine === "local:qwen"
+                      ? "Local Pipeline (Qwen3-ASR 1.7B + Diarization)"
+                      : selectedEngine === "local:cohere"
+                      ? "Local Pipeline (Cohere Transcribe + Diarization)"
+                      : "Speechmatics Cloud"}
                   </span>
                   <span className="text-stone-500">•</span>
                   <span className="text-lime-300 font-medium capitalize">
@@ -1119,7 +1142,7 @@ function MeetingDetailView({
           )}
 
           {/* Expandable Diarization Threshold Tuning */}
-          {showDiarizationSettings && selectedProvider === "local" && (
+          {showDiarizationSettings && selectedEngine.startsWith("local") && (
             <div className="rounded-xl border border-stone-800 bg-stone-900/90 p-4 space-y-3 backdrop-blur">
               <div className="flex items-center justify-between border-b border-stone-800 pb-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-lime-400">
@@ -1874,7 +1897,7 @@ function UploadAudioModal({
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [autoTranscribe, setAutoTranscribe] = useState(true);
-  const [provider, setProvider] = useState<"local" | "speechmatics">("local");
+  const [selectedEngine, setSelectedEngine] = useState<string>("local:granite");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1898,13 +1921,24 @@ function UploadAudioModal({
     setUploading(true);
     setError(null);
 
+    const isLocal = selectedEngine.startsWith("local");
     const formData = new FormData();
     formData.append("file", file);
     if (title.trim()) {
       formData.append("title", title.trim());
     }
     formData.append("autoTranscribe", String(autoTranscribe));
-    formData.append("provider", provider);
+    formData.append("provider", isLocal ? "local" : "speechmatics");
+    if (isLocal) {
+      formData.append(
+        "modelId",
+        selectedEngine === "local:qwen"
+          ? "tonythethompson/Qwen3-ASR-1.7B-ONNX"
+          : selectedEngine === "local:cohere"
+          ? "onnx-community/cohere-transcribe-03-2026-ONNX"
+          : "onnx-community/granite-4.0-1b-speech-ONNX"
+      );
+    }
 
     try {
       const res = await fetch("/api/ingest", {
@@ -1988,11 +2022,13 @@ function UploadAudioModal({
               <div className="pt-2 pl-6">
                 <label className="block text-xs text-stone-400 mb-1">Transcription Engine:</label>
                 <select
-                  value={provider}
-                  onChange={(e) => setProvider(e.target.value as "local" | "speechmatics")}
+                  value={selectedEngine}
+                  onChange={(e) => setSelectedEngine(e.target.value)}
                   className="w-full rounded border border-stone-700 bg-stone-900 px-2 py-1 text-xs text-stone-200"
                 >
-                  <option value="local">Local SOTA (Cohere 2B + Offline Diarizer)</option>
+                  <option value="local:granite">Local: IBM Granite Speech (ONNX + Diarizer)</option>
+                  <option value="local:qwen">Local: Qwen3-ASR 1.7B (ONNX + Diarizer)</option>
+                  <option value="local:cohere">Local: Cohere Transcribe (ONNX + Diarizer)</option>
                   <option value="speechmatics">Speechmatics (Cloud API)</option>
                 </select>
               </div>
@@ -2740,6 +2776,7 @@ function LlmSettingsModal({
   const [baseUrl, setBaseUrl] = useState<string>("");
   const [localClusteringThreshold, setLocalClusteringThreshold] = useState<number>(0.85);
   const [localSimilarityThreshold, setLocalSimilarityThreshold] = useState<number>(0.85);
+  const [localAsrModel, setLocalAsrModel] = useState<string>("onnx-community/granite-4.0-1b-speech-ONNX");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshingCatalog, setRefreshingCatalog] = useState(false);
@@ -2777,6 +2814,9 @@ function LlmSettingsModal({
         }
         if (appCfg.localSimilarityThreshold !== undefined) {
           setLocalSimilarityThreshold(appCfg.localSimilarityThreshold);
+        }
+        if (appCfg.localAsrModel !== undefined) {
+          setLocalAsrModel(appCfg.localAsrModel);
         }
       }
 
@@ -2907,7 +2947,8 @@ function LlmSettingsModal({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             localClusteringThreshold,
-            localSimilarityThreshold
+            localSimilarityThreshold,
+            localAsrModel
           })
         })
       ]);
@@ -3071,12 +3112,35 @@ function LlmSettingsModal({
             <div className="rounded-xl border border-stone-800 bg-stone-950/60 p-4 space-y-3.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold uppercase tracking-wider text-stone-300">
-                  🎙️ Local Speaker Diarization & Recognition
+                  🎙️ Local ASR & Speaker Recognition
                 </span>
-                <span className="text-[11px] text-stone-500 font-mono">Sensitivity Tuning</span>
+                <span className="text-[11px] text-stone-500 font-mono">Engine & Sensitivity Tuning</span>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {/* ASR Model Selector */}
+              <div className="space-y-1.5">
+                <label className="text-xs text-stone-300 font-medium flex items-center justify-between">
+                  <span>Local Speech-to-Text Model:</span>
+                  <span className="text-[10px] text-stone-500 font-mono">ONNX CPU Quantized (q4)</span>
+                </label>
+                <select
+                  value={localAsrModel}
+                  onChange={(e) => setLocalAsrModel(e.target.value)}
+                  className="w-full rounded-lg border border-stone-700 bg-stone-900 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none"
+                >
+                  <option value="onnx-community/granite-4.0-1b-speech-ONNX">
+                    IBM Granite Speech 4.0 1B (Recommended — High Accuracy Multilingual ASR)
+                  </option>
+                  <option value="tonythethompson/Qwen3-ASR-1.7B-ONNX">
+                    Qwen3-ASR 1.7B (INT4 ONNX — 52 Languages & Accents)
+                  </option>
+                  <option value="onnx-community/cohere-transcribe-03-2026-ONNX">
+                    Cohere Transcribe (03-2026 ONNX)
+                  </option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 pt-1">
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs">
                     <label htmlFor="clustering-threshold-slider" className="text-stone-300 font-medium">

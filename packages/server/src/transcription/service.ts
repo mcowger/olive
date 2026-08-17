@@ -48,6 +48,7 @@ export interface TranscribeMeetingOptions {
   force?: boolean;
   similarityThreshold?: number;
   clusteringThreshold?: number;
+  modelId?: string;
   onProgress?: (update: TranscriptionProgressUpdate) => void | Promise<void>;
 }
 
@@ -265,6 +266,7 @@ export class TranscriptionService {
         enrolledSpeakers,
         similarityThreshold: options.similarityThreshold,
         clusteringThreshold: options.clusteringThreshold,
+        modelId: options.modelId,
         onProgress: options.onProgress
       });
 

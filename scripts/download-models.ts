@@ -1,7 +1,13 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { pipeline, env } from "@huggingface/transformers";
+import {
+  pipeline,
+  env,
+  AutoProcessor,
+  AutoTokenizer,
+  GraniteSpeechForConditionalGeneration
+} from "@huggingface/transformers";
 
 const defaultCacheDir = existsSync("/app")
   ? "/app/.cache/huggingface"
@@ -13,17 +19,56 @@ mkdirSync(cacheDir, { recursive: true });
 
 console.log(`[download-models] Pre-downloading model weights to: ${cacheDir}`);
 
-// 1. Download Local ASR ONNX Model
-const modelId = process.env.LOCAL_ASR_MODEL_ID || "onnx-community/cohere-transcribe-03-2026-ONNX";
-console.log(`[download-models] Fetching ASR model: ${modelId} (q4)...`);
+// 1. Download IBM Granite Speech ONNX Model
+const graniteModelId = "onnx-community/granite-4.0-1b-speech-ONNX";
+console.log(`[download-models] Fetching IBM Granite Speech model: ${graniteModelId} (q4)...`);
 try {
-  await pipeline("automatic-speech-recognition", modelId, {
+  await AutoProcessor.from_pretrained(graniteModelId);
+  await GraniteSpeechForConditionalGeneration.from_pretrained(graniteModelId, {
+    dtype: {
+      embed_tokens: "q4",
+      audio_encoder: "q4",
+      decoder_model_merged: "q4"
+    },
+    device: "cpu"
+  });
+  console.log(`[download-models] Successfully cached IBM Granite Speech model: ${graniteModelId}`);
+} catch (err) {
+  console.warn(`[download-models] IBM Granite Speech download warning: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+// 2. Download Cohere Transcribe ONNX Model
+const cohereModelId = "onnx-community/cohere-transcribe-03-2026-ONNX";
+console.log(`[download-models] Fetching Cohere Transcribe model: ${cohereModelId} (q4)...`);
+try {
+  await pipeline("automatic-speech-recognition", cohereModelId, {
     dtype: "q4",
     device: "cpu"
   });
-  console.log(`[download-models] Successfully cached ASR model: ${modelId}`);
+  console.log(`[download-models] Successfully cached Cohere Transcribe model: ${cohereModelId}`);
 } catch (err) {
-  console.warn(`[download-models] ASR model download warning: ${err instanceof Error ? err.message : String(err)}`);
+  console.warn(`[download-models] Cohere Transcribe download warning: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+// 3. Download Qwen3-ASR 1.7B GGUF Model & Multimodal Projector
+const qwenGgufRepo = "ggml-org/Qwen3-ASR-1.7B-GGUF";
+console.log(`[download-models] Fetching Qwen3-ASR GGUF files: ${qwenGgufRepo}...`);
+try {
+  const hubDir = join(cacheDir, "hub", "models--ggml-org--Qwen3-ASR-1.7B-GGUF", "snapshots", "default");
+  mkdirSync(hubDir, { recursive: true });
+  for (const filename of ["Qwen3-ASR-1.7B-Q8_0.gguf", "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf"]) {
+    const dest = join(hubDir, filename);
+    if (!existsSync(dest)) {
+      console.log(`[download-models] Downloading ${filename}...`);
+      const res = await fetch(`https://huggingface.co/${qwenGgufRepo}/resolve/main/${filename}`);
+      if (res.ok) {
+        await Bun.write(dest, res);
+        console.log(`[download-models] Successfully cached ${filename}`);
+      }
+    }
+  }
+} catch (err) {
+  console.warn(`[download-models] Qwen3-ASR GGUF download warning: ${err instanceof Error ? err.message : String(err)}`);
 }
 
 // 2. Fetch and cache web model catalog for offline availability

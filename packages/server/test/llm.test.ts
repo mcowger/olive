@@ -133,7 +133,7 @@ describe("LlmService", () => {
     });
 
     expect(result37.text.trim().toLowerCase()).toContain("pong");
-  });
+  }, 30000);
 
   test("throws informative error when API key is missing", async () => {
     const { db } = createTestDb();

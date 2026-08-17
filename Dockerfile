@@ -1,10 +1,17 @@
 # syntax=docker/dockerfile:1
 
-# Stage 1: Isolated Model Pre-caching Stage
+# Stage 1: Isolated Model Pre-caching & Llama.cpp Vulkan Binary Stage
 # This stage ONLY depends on the model downloader script and transformers package.
 # It is completely decoupled from application code, package.json, and bun.lock changes.
 FROM oven/bun:1.3.14 AS model-downloader
 WORKDIR /models
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /models/bin && \
+    curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/b10453/llama-b10453-bin-ubuntu-vulkan-x64.tar.gz" -o /models/llama.tar.gz && \
+    tar -xzf /models/llama.tar.gz -C /models/bin --strip-components=1 && \
+    rm /models/llama.tar.gz
 
 RUN bun add @huggingface/transformers@4.2.0
 
@@ -37,11 +44,16 @@ RUN bun run build:web
 FROM oven/bun:1.3.14 AS runner
 WORKDIR /app
 
-# Install runtime system utilities and audio processing dependencies
+# Install runtime system utilities, audio processing, and Vulkan / Mesa GPU drivers
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     ca-certificates \
+    mesa-vulkan-drivers \
+    libvulkan1 \
+    vulkan-tools \
+    libva-drm2 \
+    libdrm2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built application and node_modules
@@ -50,6 +62,12 @@ COPY --from=app-builder /app /app
 # Copy cached model weights and offline catalog from the model-downloader stage
 COPY --from=model-downloader /models/.cache/huggingface /app/.cache/huggingface
 COPY --from=model-downloader /models/data/config /app/data/config
+
+# Copy llama.cpp Vulkan binary suite
+COPY --from=model-downloader /models/bin /usr/local/llama
+ENV PATH="/usr/local/llama:${PATH}" \
+    LD_LIBRARY_PATH="/usr/local/llama:${LD_LIBRARY_PATH}" \
+    LLAMA_SERVER_BIN="/usr/local/llama/llama-server"
 
 ENV NODE_ENV=production \
     PORT=4470 \

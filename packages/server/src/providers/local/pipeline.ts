@@ -31,6 +31,7 @@ export interface TranscribeAudioOptions {
   enrolledSpeakers?: EnrolledSpeaker[];
   similarityThreshold?: number;
   clusteringThreshold?: number;
+  modelId?: string;
   onProgress?: TranscriptionProgressCallback;
 }
 
@@ -207,7 +208,8 @@ export class LocalTranscriptionPipeline {
         targetSampleRate,
         {
           language: options.language,
-          startMs: seg.startMs
+          startMs: seg.startMs,
+          modelId: options.modelId
         }
       );
 

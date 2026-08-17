@@ -18,6 +18,7 @@ export interface IngestAudioOptions {
   durationMs?: number;
   autoTranscribe?: boolean;
   transcriptionProvider?: "speechmatics" | "local";
+  modelId?: string;
 }
 
 export interface IngestAudioResult {
@@ -260,7 +261,8 @@ export class IngestService {
 
       void this.transcriptionService
         .transcribeMeeting(meetingId, {
-          provider: options.transcriptionProvider || "speechmatics"
+          provider: options.transcriptionProvider || "speechmatics",
+          modelId: options.modelId
         })
         .catch((err) => {
           this.logger.error("Auto-transcription after ingest failed", {

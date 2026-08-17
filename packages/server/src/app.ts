@@ -224,6 +224,7 @@ export function createApp(options: AppOptions = {}): Hono {
     const sourceParam = formData.get("source");
     const autoTranscribeParam = formData.get("autoTranscribe");
     const providerParam = formData.get("provider");
+    const modelIdParam = formData.get("modelId");
 
     const userAgent = c.req.header("user-agent") || "";
     const isShortcut = userAgent.includes("Shortcuts") || sourceParam === "ios-shortcut";
@@ -240,6 +241,7 @@ export function createApp(options: AppOptions = {}): Hono {
     const autoTranscribe =
       autoTranscribeParam === "true" || autoTranscribeParam === "1";
     const transcriptionProvider = providerParam === "local" ? "local" : "speechmatics";
+    const modelId = typeof modelIdParam === "string" && modelIdParam.trim() ? modelIdParam.trim() : undefined;
 
     try {
       const result = await ingestService.ingestAudio({
@@ -249,7 +251,8 @@ export function createApp(options: AppOptions = {}): Hono {
         title: typeof title === "string" ? title : undefined,
         source,
         autoTranscribe,
-        transcriptionProvider
+        transcriptionProvider,
+        modelId
       });
 
       return c.json(result, result.deduped ? 200 : 201);
@@ -361,6 +364,7 @@ export function createApp(options: AppOptions = {}): Hono {
       maxPollWaitMs?: number;
       similarityThreshold?: number;
       clusteringThreshold?: number;
+      modelId?: string;
       stream?: boolean;
     } = {};
     try {
@@ -372,14 +376,14 @@ export function createApp(options: AppOptions = {}): Hono {
     try {
       let similarityThreshold = body.similarityThreshold;
       let clusteringThreshold = body.clusteringThreshold;
+      let modelId = body.modelId;
 
-      if (similarityThreshold === undefined || clusteringThreshold === undefined) {
-        try {
-          const cfg = loadAppConfig(paths);
-          if (similarityThreshold === undefined) similarityThreshold = cfg.localSimilarityThreshold;
-          if (clusteringThreshold === undefined) clusteringThreshold = cfg.localClusteringThreshold;
-        } catch {}
-      }
+      try {
+        const cfg = loadAppConfig(paths);
+        if (similarityThreshold === undefined) similarityThreshold = cfg.localSimilarityThreshold;
+        if (clusteringThreshold === undefined) clusteringThreshold = cfg.localClusteringThreshold;
+        if (modelId === undefined) modelId = cfg.localAsrModel;
+      } catch {}
 
       const wantsStream =
         body.stream === true ||
@@ -407,6 +411,7 @@ export function createApp(options: AppOptions = {}): Hono {
               maxPollWaitMs: body.maxPollWaitMs,
               similarityThreshold,
               clusteringThreshold,
+              modelId,
               onProgress: async (update) => {
                 try {
                   await stream.writeSSE({
@@ -448,7 +453,8 @@ export function createApp(options: AppOptions = {}): Hono {
         pollIntervalMs: body.pollIntervalMs,
         maxPollWaitMs: body.maxPollWaitMs,
         similarityThreshold,
-        clusteringThreshold
+        clusteringThreshold,
+        modelId
       });
 
       return c.json(result, result.status === "error" ? 502 : 200);

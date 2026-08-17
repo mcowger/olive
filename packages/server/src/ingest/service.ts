@@ -130,6 +130,14 @@ export class IngestService {
     const startTime = options.startTime || currentTime;
     const sha256 = createHash("sha256").update(options.audioBytes).digest("hex");
 
+    this.logger.debug("Ingesting audio payload", {
+      category: "ingest",
+      sizeBytes: options.audioBytes.byteLength,
+      mime: options.mime,
+      filename: options.filename,
+      sha256
+    });
+
     // 1. SHA-256 Deduplication check
     const existingRecording = await this.db
       .selectFrom("recordings")
@@ -146,6 +154,7 @@ export class IngestService {
 
       if (existingMeeting) {
         this.logger.info("Audio upload deduplicated via SHA-256", {
+          category: "ingest",
           sha256,
           meetingId: existingMeeting.id,
           recordingId: existingRecording.id
@@ -179,6 +188,15 @@ export class IngestService {
     const paths = ensureMeetingFolder(meetingPaths(this.meetingsDir, startTime, title, meetingId));
     const relativePath = join("audio", `${recordingId}.${extension}`);
     const destinationAbsolutePath = join(paths.folder, relativePath);
+
+    this.logger.debug("Writing ingested audio file to disk", {
+      category: "ingest",
+      meetingId,
+      recordingId,
+      destinationAbsolutePath,
+      extension,
+      mime
+    });
 
     await writeFile(destinationAbsolutePath, options.audioBytes);
 
@@ -224,6 +242,7 @@ export class IngestService {
       .executeTakeFirstOrThrow();
 
     this.logger.info("Audio ingested successfully", {
+      category: "ingest",
       meetingId,
       recordingId,
       source,
@@ -233,12 +252,19 @@ export class IngestService {
 
     // 5. Trigger automatic transcription if requested
     if (options.autoTranscribe && this.transcriptionService) {
+      this.logger.debug("Triggering auto-transcription after audio ingest", {
+        category: "transcription",
+        meetingId,
+        provider: options.transcriptionProvider || "speechmatics"
+      });
+
       void this.transcriptionService
         .transcribeMeeting(meetingId, {
           provider: options.transcriptionProvider || "speechmatics"
         })
         .catch((err) => {
           this.logger.error("Auto-transcription after ingest failed", {
+            category: "transcription",
             meetingId,
             error: err instanceof Error ? err.message : String(err)
           });

@@ -108,11 +108,19 @@ export class TranscriptionService {
         .executeTakeFirst();
 
       if (meeting && !meeting.primary_summary_artifact_id) {
+        this.logger.debug("Triggering auto-summarization on transcript completion", {
+          category: "summary",
+          meetingId
+        });
         await this.summaryService.generateSummary({ meetingId, setPrimary: true });
-        this.logger.info("Auto-generated summary on transcript completion", { meetingId });
+        this.logger.info("Auto-generated summary on transcript completion", {
+          category: "summary",
+          meetingId
+        });
       }
     } catch (err) {
       this.logger.warn("Auto-summarization skipped or failed on transcript completion", {
+        category: "summary",
         meetingId,
         error: err instanceof Error ? err.message : String(err)
       });
@@ -132,6 +140,14 @@ export class TranscriptionService {
     options: TranscribeMeetingOptions = {}
   ): Promise<TranscribeMeetingResult> {
     const provider = options.provider ?? this.defaultProvider;
+
+    this.logger.debug("Initiating meeting transcription", {
+      category: "transcription",
+      meetingId,
+      provider,
+      language: options.language,
+      force: Boolean(options.force)
+    });
 
     if (provider === "local") {
       return this.transcribeMeetingLocal(meetingId, options);

@@ -245,3 +245,17 @@ export const restoreResultSchema = z.object({
   })
 });
 
+export const logLevelSchema = z.enum(["debug", "info", "warn", "error"]);
+
+export const logItemSchema = z.object({
+  id: z.string().uuid(),
+  level: logLevelSchema,
+  category: z.string(),
+  message: z.string(),
+  meetingId: z.string().uuid().nullable(),
+  meetingTitle: z.string().nullable().optional(),
+  details: z.record(z.string(), z.unknown()).nullable(),
+  createdAt: z.number().int()
+});
+
+

@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { join, normalize, relative } from "node:path";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
-import type { Database } from "@olive/shared";
+import type { Database, LogItem, LogLevel } from "@olive/shared";
 import { getDb } from "./db.ts";
 import { resolvePaths } from "./paths.ts";
 import { getMeeting, listMeetings } from "./meetings.ts";
@@ -43,6 +43,15 @@ export interface AppOptions {
   ingestToken?: string;
 }
 
+function parseJsonField<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 function numericQueryParam(value: string | undefined): number | undefined {
   if (value === undefined || value === "") {
     return undefined;
@@ -68,7 +77,11 @@ async function serveWebAsset(webRoot: string, requestPath: string): Promise<Resp
   }
 
   const indexPath = join(webRoot, "index.html");
-  return existsSync(indexPath) ? new Response(Bun.file(indexPath)) : undefined;
+  return existsSync(indexPath)
+    ? new Response(Bun.file(indexPath), {
+        headers: { "Content-Type": "text/html; charset=utf-8" }
+      })
+    : undefined;
 }
 
 export function createApp(options: AppOptions = {}): Hono {
@@ -934,6 +947,123 @@ export function createApp(options: AppOptions = {}): Hono {
       } else {
         return c.json({ error: "Content-Type must be multipart/form-data or application/json" }, 400);
       }
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // Logs API
+  app.get("/api/logs", async (c) => {
+    try {
+      const minLevel = (c.req.query("level")?.toLowerCase() || "debug") as LogLevel;
+      const category = c.req.query("category")?.trim();
+      const meetingId = c.req.query("meetingId")?.trim();
+      const search = c.req.query("search")?.trim();
+      const limit = Math.min(Math.max(numericQueryParam(c.req.query("limit")) ?? 100, 1), 500);
+      const offset = Math.max(numericQueryParam(c.req.query("offset")) ?? 0, 0);
+
+      const levelHierarchy: Record<LogLevel, LogLevel[]> = {
+        debug: ["debug", "info", "warn", "error"],
+        info: ["info", "warn", "error"],
+        warn: ["warn", "error"],
+        error: ["error"]
+      };
+
+      const allowedLevels = levelHierarchy[minLevel] || levelHierarchy.debug;
+
+      let query = db
+        .selectFrom("logs")
+        .leftJoin("meetings", "meetings.id", "logs.meeting_id")
+        .select([
+          "logs.id",
+          "logs.level",
+          "logs.category",
+          "logs.message",
+          "logs.meeting_id as meetingId",
+          "meetings.title as meetingTitle",
+          "logs.details",
+          "logs.created_at as createdAt"
+        ])
+        .where("logs.level", "in", allowedLevels);
+
+      let countQuery = db
+        .selectFrom("logs")
+        .select((eb) => eb.fn.count<number>("id").as("total"))
+        .where("logs.level", "in", allowedLevels);
+
+      if (category) {
+        query = query.where("logs.category", "=", category);
+        countQuery = countQuery.where("logs.category", "=", category);
+      }
+
+      if (meetingId) {
+        query = query.where("logs.meeting_id", "=", meetingId);
+        countQuery = countQuery.where("logs.meeting_id", "=", meetingId);
+      }
+
+      if (search) {
+        const searchPattern = `%${search}%`;
+        query = query.where((eb) =>
+          eb.or([
+            eb("logs.message", "like", searchPattern),
+            eb("logs.details", "like", searchPattern),
+            eb("meetings.title", "like", searchPattern),
+            eb("logs.category", "like", searchPattern)
+          ])
+        );
+        countQuery = countQuery.where((eb) =>
+          eb.or([
+            eb("logs.message", "like", searchPattern),
+            eb("logs.details", "like", searchPattern),
+            eb("logs.category", "like", searchPattern)
+          ])
+        );
+      }
+
+      const [rows, countRow, categoriesRows] = await Promise.all([
+        query.orderBy("logs.created_at", "desc").limit(limit).offset(offset).execute(),
+        countQuery.executeTakeFirst(),
+        db.selectFrom("logs").select("category").distinct().orderBy("category", "asc").execute()
+      ]);
+
+      const logs: LogItem[] = rows.map((r) => ({
+        id: r.id,
+        level: r.level as LogLevel,
+        category: r.category,
+        message: r.message,
+        meetingId: r.meetingId,
+        meetingTitle: r.meetingTitle,
+        details: parseJsonField(r.details, null),
+        createdAt: r.createdAt
+      }));
+
+      const total = Number(countRow?.total ?? 0);
+      const categories = categoriesRows.map((cat) => cat.category).filter(Boolean);
+
+      return c.json({
+        ok: true,
+        logs,
+        pagination: {
+          total,
+          limit,
+          offset
+        },
+        categories
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.delete("/api/logs", async (c) => {
+    try {
+      const olderThan = numericQueryParam(c.req.query("olderThanMs"));
+      let deleteQuery = db.deleteFrom("logs");
+      if (olderThan) {
+        deleteQuery = deleteQuery.where("created_at", "<", olderThan);
+      }
+      await deleteQuery.execute();
+      return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }

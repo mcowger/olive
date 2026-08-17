@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
 import type { EnrolledSpeaker, Transcript, TranscriptSegment } from "@olive/shared";
-import { decodeWav, resample } from "./wav.ts";
+import { decodeWav, loadAudioSamples, resample } from "./wav.ts";
 import {
   AcousticFeatureEmbeddingExtractor,
   cosineSimilarity,
@@ -50,7 +49,7 @@ export class LocalTranscriptionPipeline {
       customAsrEngine ??
       new TransformersAsrEngine(options.asrConfig);
 
-    this.similarityThreshold = options.voiceprintConfig?.similarityThreshold ?? 0.65;
+    this.similarityThreshold = options.voiceprintConfig?.similarityThreshold ?? 0.85;
     this.centroidUpdateRate = options.voiceprintConfig?.centroidUpdateRate ?? 0.85;
   }
 
@@ -59,25 +58,11 @@ export class LocalTranscriptionPipeline {
    * speaker diarization and cross-recording speaker identification.
    */
   async transcribe(options: TranscribeAudioOptions): Promise<LocalTranscriptionResult> {
-    let rawBytes: Uint8Array;
-    if (options.audioBytes) {
-      rawBytes = options.audioBytes;
-    } else if (options.audioPath) {
-      rawBytes = new Uint8Array(await readFile(options.audioPath));
-    } else {
-      throw new Error("Either audioPath or audioBytes must be provided");
-    }
-
-    // 1. Decode WAV to mono Float32Array
-    let decoded = decodeWav(rawBytes);
-    let samples = decoded.samples;
+    // 1. Decode audio (WAV, MP3, M4A, etc.) to 16kHz mono Float32Array
     const targetSampleRate = 16000;
-
-    if (decoded.sampleRate !== targetSampleRate) {
-      samples = resample(samples, decoded.sampleRate, targetSampleRate);
-    }
-
-    const durationMs = Math.round((samples.length / targetSampleRate) * 1000);
+    const decoded = await loadAudioSamples(options, targetSampleRate);
+    const samples = decoded.samples;
+    const durationMs = decoded.durationMs;
 
     // 2. Perform Speaker Diarization
     const speakerSegments = await this.diarizer.diarize(samples, targetSampleRate);
@@ -184,8 +169,11 @@ export class LocalTranscriptionPipeline {
       });
     }
 
+    // 6. Coalesce consecutive segments from the same speaker into natural conversational turns
+    const coalescedSegments = coalesceSpeakerSegments(finalSegments);
+
     const transcript: Transcript = {
-      segments: finalSegments,
+      segments: coalescedSegments,
       language: options.language || "en",
       durationMs
     };
@@ -195,4 +183,48 @@ export class LocalTranscriptionPipeline {
       discoveredSpeakers: Array.from(discoveredMap.values())
     };
   }
+}
+
+/**
+ * Merges consecutive segments from the same speaker if the silence gap between them is reasonable (< 3000ms).
+ */
+export function coalesceSpeakerSegments(segments: TranscriptSegment[], maxGapMs = 3000): TranscriptSegment[] {
+  if (segments.length <= 1) {
+    return segments;
+  }
+
+  const merged: TranscriptSegment[] = [];
+  let current: TranscriptSegment = {
+    ...segments[0],
+    words: segments[0].words ? [...segments[0].words] : []
+  };
+
+  for (let i = 1; i < segments.length; i++) {
+    const next = segments[i];
+    const sameSpeaker = current.speaker.trim().toLowerCase() === next.speaker.trim().toLowerCase();
+    const gapMs = next.startMs - current.endMs;
+
+    if (sameSpeaker && (gapMs <= maxGapMs || !current.text.trim())) {
+      const glue = current.text.trim() && next.text.trim() ? " " : "";
+      current.text = `${current.text.trim()}${glue}${next.text.trim()}`.trim();
+      current.endMs = Math.max(current.endMs, next.endMs);
+      if (next.words && next.words.length > 0) {
+        current.words = [...(current.words || []), ...next.words];
+      }
+    } else {
+      if (current.text.trim()) {
+        merged.push(current);
+      }
+      current = {
+        ...next,
+        words: next.words ? [...next.words] : []
+      };
+    }
+  }
+
+  if (current.text.trim()) {
+    merged.push(current);
+  }
+
+  return merged;
 }

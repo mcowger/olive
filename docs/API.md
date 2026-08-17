@@ -380,6 +380,54 @@ Response (HTTP 200):
 
 ---
 
+## Logs API
+
+### `GET /api/logs?level=&category=&meetingId=&search=&limit=&offset=`
+
+Queries structured system and job logs with severity level filtering, category filtering, meeting scoping, text search, and pagination.
+
+* **Parameters:**
+  * `level`: Minimum severity level (`"debug"` | `"info"` | `"warn"` | `"error"`, defaults to `"debug"`). Filters for all logs at or above this severity.
+  * `category`: Optional category filter (e.g. `"ingest"`, `"transcription"`, `"diarization"`, `"summary"`, `"speakers"`, `"plaud"`, `"backup"`, `"llm"`).
+  * `meetingId`: Optional meeting UUID to scope logs to a specific meeting.
+  * `search`: Fuzzy search substring against log message and JSON details.
+  * `limit`: Page limit (default `100`, max `500`).
+  * `offset`: Page offset (default `0`).
+
+Response (HTTP 200):
+```json
+{
+  "ok": true,
+  "logs": [
+    {
+      "id": "uuid",
+      "level": "info",
+      "category": "transcription",
+      "message": "Transcription completed successfully",
+      "meetingId": "uuid",
+      "meetingTitle": "Architecture Sync",
+      "details": {
+        "segmentCount": 24,
+        "durationMs": 312000
+      },
+      "createdAt": 1786933000000
+    }
+  ],
+  "pagination": {
+    "total": 150,
+    "limit": 100,
+    "offset": 0
+  },
+  "categories": ["backup", "diarization", "ingest", "llm", "plaud", "speakers", "summary", "system", "transcription"]
+}
+```
+
+### `DELETE /api/logs?olderThanMs=`
+
+Clears stored logs from SQLite database, with optional `olderThanMs` timestamp cutoff.
+
+---
+
 ## Command Line Utilities
 
 ### Create Backup

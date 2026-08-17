@@ -31,6 +31,7 @@ try {
   const result = await Bun.build({
     entrypoints: ["packages/web/src/index.html"],
     outdir: "packages/web/dist",
+    publicPath: "/",
     minify: true,
     target: "browser"
   });

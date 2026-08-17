@@ -98,6 +98,18 @@ export interface TemplateTable {
   updated_at: number;
 }
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LogTable {
+  id: string;
+  level: LogLevel;
+  category: string;
+  message: string;
+  meeting_id: string | null;
+  details: string | null;
+  created_at: number;
+}
+
 export interface Database {
   meetings: MeetingTable;
   recordings: RecordingTable;
@@ -108,6 +120,7 @@ export interface Database {
   plaud_ingest_state: PlaudIngestStateTable;
   sync_state: SyncStateTable;
   templates: TemplateTable;
+  logs: LogTable;
 }
 
 export type MeetingRow = Selectable<MeetingTable>;
@@ -130,6 +143,8 @@ export type NewSyncState = Insertable<SyncStateTable>;
 export type TemplateRow = Selectable<TemplateTable>;
 export type NewTemplate = Insertable<TemplateTable>;
 export type TemplateUpdate = Updateable<TemplateTable>;
+export type LogRow = Selectable<LogTable>;
+export type NewLog = Insertable<LogTable>;
 
 export interface Template {
   id: string;
@@ -371,4 +386,26 @@ export interface RestoreResult {
     templates: number;
   };
 }
+
+export interface LogItem {
+  id: string;
+  level: LogLevel;
+  category: string;
+  message: string;
+  meetingId: string | null;
+  meetingTitle?: string | null;
+  details: Record<string, unknown> | null;
+  createdAt: number;
+}
+
+export interface LogListResponse {
+  logs: LogItem[];
+  pagination: {
+    total: number;
+    limit: number;
+    offset: number;
+  };
+  categories: string[];
+}
+
 

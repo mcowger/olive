@@ -19,8 +19,8 @@ export class LocalSpeakerDiarizer implements DiarizerInterface {
       frameShiftMs: config.frameShiftMs ?? 15,
       energyThreshold: config.energyThreshold ?? 0.005,
       minSpeechDurationMs: config.minSpeechDurationMs ?? 300,
-      minSilenceDurationMs: config.minSilenceDurationMs ?? 300,
-      clusteringThreshold: config.clusteringThreshold ?? 0.60
+      minSilenceDurationMs: config.minSilenceDurationMs ?? 400,
+      clusteringThreshold: config.clusteringThreshold ?? 0.85
     };
   }
 
@@ -120,7 +120,7 @@ export class LocalSpeakerDiarizer implements DiarizerInterface {
       const next = candidateSegments[i];
       const gapMs = next.startMs - current.endMs;
 
-      if (next.clusterId === current.clusterId && gapMs <= 400) {
+      if (next.clusterId === current.clusterId && gapMs <= 1500) {
         // Extend current segment
         current.endMs = next.endMs;
         const startSample = Math.floor((current.startMs / 1000) * sampleRate);

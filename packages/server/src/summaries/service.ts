@@ -194,6 +194,13 @@ export class SummaryService {
       )
       .execute();
 
+    logger.debug("Prompt rendered for summary generation", {
+      category: "summary",
+      meetingId: meeting.id,
+      template: template.name,
+      promptLength: userPrompt.length
+    });
+
     let llmResult;
     try {
       llmResult = await this.llmService.generateText({
@@ -202,6 +209,15 @@ export class SummaryService {
         thinkingLevel: options.thinkingLevel,
         systemPrompt: systemPrompt || undefined,
         prompt: userPrompt
+      });
+
+      logger.debug("LLM summary generation response received", {
+        category: "llm",
+        meetingId: meeting.id,
+        provider: llmResult.provider,
+        model: llmResult.model,
+        durationMs: llmResult.durationMs,
+        usage: llmResult.usage
       });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -228,6 +244,14 @@ export class SummaryService {
     const filename = `summary_${now}_${artifactId.slice(0, 8)}.md`;
     const relativePath = `summaries/${filename}`;
     const fullPath = join(summariesDir, filename);
+
+    logger.debug("Saving summary markdown artifact to disk", {
+      category: "summary",
+      meetingId: meeting.id,
+      artifactId,
+      fullPath,
+      sizeBytes: llmResult.text.length
+    });
 
     writeFileSync(fullPath, llmResult.text, "utf8");
 

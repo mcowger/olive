@@ -6,6 +6,9 @@ import type {
   BackupInfo,
   LlmModelCatalogItem,
   LlmProviderSummary,
+  LogItem,
+  LogLevel,
+  LogListResponse,
   MeetingDetailAggregate,
   MeetingListItem,
   MeetingSummaryItem,
@@ -62,9 +65,42 @@ function formatTimeOffset(ms: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+type TabKey = "meetings" | "speakers" | "templates" | "logs" | "backup";
+
+function parseLocation(pathname: string): { tab: TabKey; meetingId: string | null } {
+  const clean = pathname.replace(/^\/+|\/+$/g, "");
+  if (!clean || clean === "meetings") {
+    return { tab: "meetings", meetingId: null };
+  }
+
+  if (clean.startsWith("meetings/")) {
+    const id = clean.slice("meetings/".length).trim();
+    return { tab: "meetings", meetingId: id || null };
+  }
+
+  if (clean === "people" || clean === "speakers") {
+    return { tab: "speakers", meetingId: null };
+  }
+
+  if (clean === "templates") {
+    return { tab: "templates", meetingId: null };
+  }
+
+  if (clean === "logs") {
+    return { tab: "logs", meetingId: null };
+  }
+
+  if (clean === "backup" || clean === "backups") {
+    return { tab: "backup", meetingId: null };
+  }
+
+  return { tab: "meetings", meetingId: null };
+}
+
 export function App(): ReactElement {
-  const [activeTab, setActiveTab] = useState<"meetings" | "speakers" | "templates" | "backup">("meetings");
-  const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
+  const initialRoute = parseLocation(typeof window !== "undefined" ? window.location.pathname : "/");
+  const [activeTab, setActiveTab] = useState<TabKey>(initialRoute.tab);
+  const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(initialRoute.meetingId);
 
   // Global speakers cache
   const [knownSpeakers, setKnownSpeakers] = useState<SpeakerWithStats[]>([]);
@@ -76,6 +112,26 @@ export function App(): ReactElement {
   // LLM status & settings
   const [llmConfig, setLlmConfig] = useState<{ defaultProvider: string; defaultModel: string } | null>(null);
   const [showLlmModal, setShowLlmModal] = useState(false);
+
+  const navigate = (path: string) => {
+    const route = parseLocation(path);
+    setActiveTab(route.tab);
+    setSelectedMeetingId(route.meetingId);
+    if (typeof window !== "undefined" && window.location.pathname !== path) {
+      window.history.pushState({}, "", path);
+    }
+  };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const route = parseLocation(window.location.pathname);
+      setActiveTab(route.tab);
+      setSelectedMeetingId(route.meetingId);
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   const refreshSpeakers = async () => {
     try {
@@ -124,62 +180,91 @@ export function App(): ReactElement {
       <nav className="border-b border-stone-800 bg-stone-900/60 backdrop-blur sticky top-0 z-30 px-6 py-4">
         <div className="mx-auto flex max-w-6xl items-center justify-between">
           <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2">
+            <a
+              href="/meetings"
+              onClick={(e) => {
+                e.preventDefault();
+                navigate("/meetings");
+              }}
+              className="flex items-center gap-2 cursor-pointer hover:opacity-90 transition"
+            >
               <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-lime-400 font-bold text-stone-950 text-base">
                 O
               </span>
               <span className="text-xl font-semibold tracking-tight">Olive</span>
-            </div>
+            </a>
             <div className="flex items-center gap-1 rounded-lg bg-stone-800/80 p-1 text-sm font-medium">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("meetings");
-                  setSelectedMeetingId(null);
+              <a
+                href="/meetings"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate("/meetings");
                 }}
                 className={`rounded-md px-3 py-1.5 transition ${
-                  activeTab === "meetings" ? "bg-stone-900 text-lime-400 shadow" : "text-stone-400 hover:text-stone-200"
+                  activeTab === "meetings" && !selectedMeetingId
+                    ? "bg-stone-900 text-lime-400 shadow"
+                    : "text-stone-400 hover:text-stone-200"
                 }`}
               >
                 Meetings
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("speakers");
-                  setSelectedMeetingId(null);
+              </a>
+              <a
+                href="/people"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate("/people");
                   void refreshSpeakers();
                 }}
                 className={`rounded-md px-3 py-1.5 transition ${
-                  activeTab === "speakers" ? "bg-stone-900 text-lime-400 shadow" : "text-stone-400 hover:text-stone-200"
+                  activeTab === "speakers"
+                    ? "bg-stone-900 text-lime-400 shadow"
+                    : "text-stone-400 hover:text-stone-200"
                 }`}
               >
                 People ({knownSpeakers.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("templates");
-                  setSelectedMeetingId(null);
+              </a>
+              <a
+                href="/templates"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate("/templates");
                 }}
                 className={`rounded-md px-3 py-1.5 transition ${
-                  activeTab === "templates" ? "bg-stone-900 text-lime-400 shadow" : "text-stone-400 hover:text-stone-200"
+                  activeTab === "templates"
+                    ? "bg-stone-900 text-lime-400 shadow"
+                    : "text-stone-400 hover:text-stone-200"
                 }`}
               >
                 Templates
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("backup");
-                  setSelectedMeetingId(null);
+              </a>
+              <a
+                href="/logs"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate("/logs");
                 }}
                 className={`rounded-md px-3 py-1.5 transition ${
-                  activeTab === "backup" ? "bg-stone-900 text-lime-400 shadow" : "text-stone-400 hover:text-stone-200"
+                  activeTab === "logs"
+                    ? "bg-stone-900 text-lime-400 shadow"
+                    : "text-stone-400 hover:text-stone-200"
+                }`}
+              >
+                Logs
+              </a>
+              <a
+                href="/backup"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate("/backup");
+                }}
+                className={`rounded-md px-3 py-1.5 transition ${
+                  activeTab === "backup"
+                    ? "bg-stone-900 text-lime-400 shadow"
+                    : "text-stone-400 hover:text-stone-200"
                 }`}
               >
                 Backup & Restore
-              </button>
+              </a>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -215,22 +300,23 @@ export function App(): ReactElement {
           <MeetingDetailView
             meetingId={selectedMeetingId}
             knownSpeakers={knownSpeakers}
-            onBack={() => setSelectedMeetingId(null)}
+            onBack={() => navigate("/meetings")}
             onSpeakerUpdated={() => void refreshSpeakers()}
           />
         ) : activeTab === "meetings" ? (
-          <MeetingsListView onSelectMeeting={(id) => setSelectedMeetingId(id)} />
+          <MeetingsListView onSelectMeeting={(id) => navigate(`/meetings/${id}`)} />
         ) : activeTab === "speakers" ? (
           <SpeakersListView
             speakers={knownSpeakers}
             onRefresh={() => void refreshSpeakers()}
-            onSelectMeeting={(id) => {
-              setActiveTab("meetings");
-              setSelectedMeetingId(id);
-            }}
+            onSelectMeeting={(id) => navigate(`/meetings/${id}`)}
           />
         ) : activeTab === "templates" ? (
           <TemplatesListView />
+        ) : activeTab === "logs" ? (
+          <LogsView
+            onSelectMeeting={(id) => navigate(`/meetings/${id}`)}
+          />
         ) : (
           <BackupRestoreView
             onRestoreComplete={() => {
@@ -2655,6 +2741,304 @@ function LlmSettingsModal({
               </div>
             </div>
           </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatLogTimestamp(timestamp: number): string {
+  const d = new Date(timestamp);
+  const pad = (n: number, z = 2) => String(n).padStart(z, "0");
+  const yr = d.getFullYear();
+  const mo = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const hr = pad(d.getHours());
+  const min = pad(d.getMinutes());
+  const sec = pad(d.getSeconds());
+  const ms = pad(d.getMilliseconds(), 3);
+  return `${yr}-${mo}-${day} ${hr}:${min}:${sec}.${ms}`;
+}
+
+export function LogsView({ onSelectMeeting }: { onSelectMeeting: (id: string) => void }): ReactElement {
+  const [logs, setLogs] = useState<LogItem[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [selectedLevel, setSelectedLevel] = useState<LogLevel>("debug");
+  const [selectedCategory, setSelectedCategory] = useState<string>("");
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [expandedLogIds, setExpandedLogIds] = useState<Set<string>>(new Set());
+
+  const fetchLogs = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (selectedLevel) params.set("level", selectedLevel);
+      if (selectedCategory) params.set("category", selectedCategory);
+      if (searchQuery.trim()) params.set("search", searchQuery.trim());
+      params.set("limit", "200");
+
+      const res = await fetch(`/api/logs?${params.toString()}`);
+      if (res.ok) {
+        const data = (await res.json()) as LogListResponse;
+        setLogs(data.logs);
+        setTotalCount(data.pagination.total);
+        if (data.categories && data.categories.length > 0) {
+          setCategories(data.categories);
+        }
+      }
+    } catch {
+      // Ignore network errors on background poll
+    }
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    void fetchLogs().finally(() => setLoading(false));
+  }, [selectedLevel, selectedCategory, searchQuery]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = setInterval(() => {
+      void fetchLogs();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [autoRefresh, selectedLevel, selectedCategory, searchQuery]);
+
+  const toggleExpand = (id: string) => {
+    setExpandedLogIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleClearLogs = async () => {
+    if (!confirm("Are you sure you want to clear all stored system logs?")) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/logs", { method: "DELETE" });
+      if (res.ok) {
+        await fetchLogs();
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header & Controls */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold tracking-tight text-stone-100">System & Job Logs</h1>
+            {autoRefresh && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-lime-400/10 border border-lime-400/30 px-2.5 py-0.5 text-[10px] font-semibold text-lime-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-lime-400 animate-pulse" />
+                Live (3s)
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-stone-400">
+            Real-time execution trace for ingestion, Speechmatics/local transcription, diarization, speaker enrollment, and AI summarization.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setAutoRefresh(!autoRefresh)}
+            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+              autoRefresh
+                ? "border-lime-400/40 bg-lime-400/10 text-lime-300 hover:bg-lime-400/20"
+                : "border-stone-700 bg-stone-800 text-stone-400 hover:text-stone-200"
+            }`}
+          >
+            {autoRefresh ? "⏸ Pause Stream" : "▶ Auto-Refresh"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void fetchLogs()}
+            disabled={loading}
+            className="rounded-lg border border-stone-700 bg-stone-800 px-3 py-1.5 text-xs font-medium text-stone-200 hover:bg-stone-700 transition disabled:opacity-50"
+          >
+            {loading ? "Refreshing…" : "🔄 Refresh"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleClearLogs()}
+            className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition"
+          >
+            🗑️ Clear
+          </button>
+        </div>
+      </div>
+
+      {/* Filter Toolbar */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-stone-800 bg-stone-900/60 p-3.5 backdrop-blur">
+        {/* Severity Level Filter */}
+        <div className="flex items-center gap-2">
+          <label htmlFor="log-level-select" className="text-xs font-medium text-stone-400">
+            Min Level:
+          </label>
+          <select
+            id="log-level-select"
+            value={selectedLevel}
+            onChange={(e) => setSelectedLevel(e.target.value as LogLevel)}
+            className="rounded-lg border border-stone-700 bg-stone-950 px-2.5 py-1.5 text-xs font-medium text-stone-200 focus:border-lime-400 focus:outline-none"
+          >
+            <option value="debug">All Levels (DEBUG+)</option>
+            <option value="info">INFO and above</option>
+            <option value="warn">WARN and ERROR only</option>
+            <option value="error">ERROR only</option>
+          </select>
+        </div>
+
+        {/* Category Filter */}
+        <div className="flex items-center gap-2">
+          <label htmlFor="log-category-select" className="text-xs font-medium text-stone-400">
+            Category:
+          </label>
+          <select
+            id="log-category-select"
+            value={selectedCategory}
+            onChange={(e) => setSelectedCategory(e.target.value)}
+            className="rounded-lg border border-stone-700 bg-stone-950 px-2.5 py-1.5 text-xs font-medium text-stone-200 focus:border-lime-400 focus:outline-none"
+          >
+            <option value="">All Categories</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Search Input */}
+        <div className="flex flex-1 min-w-[200px] items-center gap-2">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search logs by message, meeting, or detail…"
+            className="w-full rounded-lg border border-stone-700 bg-stone-950 px-3 py-1.5 text-xs text-stone-100 placeholder-stone-500 focus:border-lime-400 focus:outline-none"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="text-stone-500 hover:text-stone-300 text-xs px-1"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* Total Badge */}
+        <span className="text-[11px] font-mono text-stone-500">
+          Showing {logs.length} of {totalCount} logs
+        </span>
+      </div>
+
+      {/* Logs Table / List */}
+      <div className="rounded-xl border border-stone-800 bg-stone-900/60 backdrop-blur overflow-hidden">
+        {logs.length === 0 ? (
+          <div className="p-12 text-center text-stone-500 text-sm">
+            No log entries match the current filter criteria.
+          </div>
+        ) : (
+          <div className="divide-y divide-stone-800/60 font-mono text-xs">
+            {logs.map((log) => {
+              const isExpanded = expandedLogIds.has(log.id);
+              const hasDetails = log.details && Object.keys(log.details).length > 0;
+
+              return (
+                <div
+                  key={log.id}
+                  className={`p-3.5 transition hover:bg-stone-800/30 ${
+                    log.level === "error"
+                      ? "bg-red-500/5"
+                      : log.level === "warn"
+                      ? "bg-amber-500/5"
+                      : ""
+                  }`}
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      {/* Level Badge */}
+                      <span
+                        className={`rounded px-2 py-0.5 font-bold uppercase tracking-wider text-[10px] border ${
+                          log.level === "error"
+                            ? "border-red-500/40 bg-red-500/10 text-red-400"
+                            : log.level === "warn"
+                            ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                            : log.level === "info"
+                            ? "border-sky-500/40 bg-sky-500/10 text-sky-400"
+                            : "border-stone-700 bg-stone-800/80 text-stone-400"
+                        }`}
+                      >
+                        {log.level}
+                      </span>
+
+                      {/* Category Badge */}
+                      <span className="rounded bg-stone-800 px-2 py-0.5 text-[10px] text-lime-400 border border-stone-700">
+                        {log.category}
+                      </span>
+
+                      {/* Timestamp */}
+                      <span className="text-stone-500 text-[11px]">
+                        {formatLogTimestamp(log.createdAt)}
+                      </span>
+
+                      {/* Linked Meeting */}
+                      {log.meetingId && (
+                        <button
+                          type="button"
+                          onClick={() => onSelectMeeting(log.meetingId!)}
+                          className="rounded bg-stone-800/60 px-2 py-0.5 text-[10px] text-cyan-300 hover:bg-cyan-500/20 transition border border-cyan-500/30 truncate max-w-[220px]"
+                          title={`Open meeting ${log.meetingTitle || log.meetingId}`}
+                        >
+                          📌 {log.meetingTitle || log.meetingId.slice(0, 8)}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Details toggle */}
+                    {hasDetails && (
+                      <button
+                        type="button"
+                        onClick={() => toggleExpand(log.id)}
+                        className="rounded border border-stone-700 bg-stone-800/60 px-2 py-0.5 text-[10px] text-stone-300 hover:bg-stone-700 transition"
+                      >
+                        {isExpanded ? "▲ Hide Details" : `▼ Details (${Object.keys(log.details!).length})`}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Message */}
+                  <div className="mt-2 text-stone-200 font-sans text-xs sm:text-sm leading-relaxed">
+                    {log.message}
+                  </div>
+
+                  {/* Expanded JSON details */}
+                  {isExpanded && log.details && (
+                    <div className="mt-3 rounded-lg border border-stone-800 bg-stone-950 p-3 text-xs text-stone-300 overflow-x-auto">
+                      <pre className="font-mono text-[11px] leading-snug">
+                        {JSON.stringify(log.details, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>

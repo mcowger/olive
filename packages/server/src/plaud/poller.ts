@@ -18,8 +18,7 @@ import { ensureMeetingFolder, meetingPaths } from "../layout.ts";
 import { logger as defaultLogger, type Logger } from "../logger.ts";
 
 const DEFAULT_PAGE_SIZE = 100;
-const DEFAULT_PCS_WAIT_MS = 24 * 60 * 60 * 1000;
-const DURATION_SECONDS_THRESHOLD = 10 * 24 * 60 * 60;
+const DEFAULT_PCS_WAIT_MS = 5 * 60 * 1000;
 const DEFAULT_AUDIO_EXTENSION = "m4a";
 const PLAUD_PROVIDER = "plaud";
 
@@ -96,12 +95,14 @@ function parseTimestamp(value: string | null | undefined, fallback: number): num
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
-function durationToMs(duration: number | null | undefined): number {
-  if (duration === null || duration === undefined || !Number.isFinite(duration) || duration < 0) {
+export function durationToMs(duration: number | null | undefined): number {
+  if (duration === null || duration === undefined || !Number.isFinite(duration) || duration <= 0) {
     return 0;
   }
 
-  return duration < DURATION_SECONDS_THRESHOLD ? Math.round(duration * 1000) : Math.round(duration);
+  // If duration is under 1000, it represents seconds (e.g. 12s -> 12000ms).
+  // Otherwise, durations from Plaud API are in milliseconds (e.g. 252960ms -> ~4.2m).
+  return duration < 1000 ? Math.round(duration * 1000) : Math.round(duration);
 }
 
 function normalizeSpeakerName(name: string): string {
@@ -171,7 +172,7 @@ function summaryToMarkdown(notes: Array<{ type: string; content: string }>): str
 }
 
 function contentIsReady(detail: FileDetail): boolean {
-  return detail.source_list.length > 0 && detail.note_list.length > 0;
+  return (detail.source_list?.length ?? 0) > 0 || (detail.note_list?.length ?? 0) > 0;
 }
 
 export class PlaudPoller {
@@ -283,12 +284,22 @@ export class PlaudPoller {
     let error: string | null = null;
 
     try {
+      this.logger.debug("Starting Plaud polling cycle", {
+        category: "plaud",
+        pageSize: this.pageSize
+      });
       discovered = await this.discover();
       discoveryCompleted = true;
       this.connected = true;
       const assetResult = await this.fetchPendingAssets();
       resolved = assetResult.resolved;
       error = assetResult.error;
+      this.logger.debug("Plaud polling cycle finished", {
+        category: "plaud",
+        discovered,
+        resolved,
+        durationMs: this.now() - startedAt
+      });
     } catch (pollError) {
       discoveryError = errorMessage(pollError);
       error = discoveryError;
@@ -376,6 +387,13 @@ export class PlaudPoller {
             pcs_resolved: 0
           })
           .execute();
+        this.logger.debug("Discovered new Plaud recording", {
+          category: "plaud",
+          meetingId,
+          plaudFileId: file.id,
+          title,
+          durationMs
+        });
         discovered += 1;
       });
     }
@@ -404,10 +422,15 @@ export class PlaudPoller {
 
       try {
         const detail = await this.client.getFile(state.plaud_file_id);
-        if (contentIsReady(detail)) {
+        const hasContent = contentIsReady(detail);
+        const deadlineExpired =
+          this.now() >= state.pcs_deadline_at ||
+          this.now() - state.first_seen_at >= this.pcsWaitMs;
+
+        if (hasContent) {
           await this.ingestReadyMeeting(meeting, state, detail);
           resolved += 1;
-        } else if (this.now() >= state.pcs_deadline_at) {
+        } else if (deadlineExpired) {
           await this.ingestAudioOnlyMeeting(meeting, state, detail);
           resolved += 1;
         }
@@ -433,40 +456,48 @@ export class PlaudPoller {
   private async ingestReadyMeeting(meeting: MeetingRow, state: PlaudIngestStateRow, detail: FileDetail): Promise<void> {
     const recording = await this.ensureRecording(meeting, state, detail);
     const segments = parseTranscriptSegments(detail.source_list);
-    const transcriptJson = `${JSON.stringify(segments, null, 2)}\n`;
-    const transcriptText = `${segmentsToText(segments)}\n`;
     const notes = extractSummaryNotes(detail.note_list);
-    const summaryMarkdown = summaryToMarkdown(notes);
     const paths = ensureMeetingFolder(meetingPaths(this.meetingsDir, meeting.start_time, meeting.title, meeting.id));
-    const transcriptJsonArtifactId = await this.ensureArtifact(
-      meeting.id,
-      recording.id,
-      "transcript",
-      "json",
-      "transcripts/plaud.json",
-      transcriptJson,
-      paths.transcriptsDir
-    );
-    await this.ensureArtifact(
-      meeting.id,
-      recording.id,
-      "transcript",
-      "txt",
-      "transcripts/plaud.txt",
-      transcriptText,
-      paths.transcriptsDir
-    );
-    const summaryArtifactId = await this.ensureArtifact(
-      meeting.id,
-      recording.id,
-      "summary",
-      "md",
-      "summaries/plaud.md",
-      summaryMarkdown,
-      paths.summariesDir
-    );
 
-    await this.persistNamedSpeakers(meeting.id, transcriptJsonArtifactId, segments);
+    let transcriptJsonArtifactId: string | null = null;
+    if (segments.length > 0) {
+      const transcriptJson = `${JSON.stringify(segments, null, 2)}\n`;
+      const transcriptText = `${segmentsToText(segments)}\n`;
+      transcriptJsonArtifactId = await this.ensureArtifact(
+        meeting.id,
+        recording.id,
+        "transcript",
+        "json",
+        "transcripts/plaud.json",
+        transcriptJson,
+        paths.transcriptsDir
+      );
+      await this.ensureArtifact(
+        meeting.id,
+        recording.id,
+        "transcript",
+        "txt",
+        "transcripts/plaud.txt",
+        transcriptText,
+        paths.transcriptsDir
+      );
+      await this.persistNamedSpeakers(meeting.id, transcriptJsonArtifactId, segments);
+    }
+
+    let summaryArtifactId: string | null = null;
+    if (notes.length > 0) {
+      const summaryMarkdown = summaryToMarkdown(notes);
+      summaryArtifactId = await this.ensureArtifact(
+        meeting.id,
+        recording.id,
+        "summary",
+        "md",
+        "summaries/plaud.md",
+        summaryMarkdown,
+        paths.summariesDir
+      );
+    }
+
     const resolvedAt = this.now();
     await this.db
       .updateTable("meetings")
@@ -485,7 +516,7 @@ export class PlaudPoller {
       .where("meeting_id", "=", meeting.id)
       .execute();
 
-    const hasOnlyGenericSpeakers = segments.every((s) => isGenericPlaudSpeaker(s.speaker));
+    const hasOnlyGenericSpeakers = segments.length === 0 || segments.every((s) => isGenericPlaudSpeaker(s.speaker));
     if (this.transcriptionService && (this.autoTranscribeWithSpeechmatics || (this.retranscribePlaudWhenUnnamed && hasOnlyGenericSpeakers))) {
       try {
         await this.transcriptionService.transcribeMeeting(meeting.id);
@@ -499,6 +530,11 @@ export class PlaudPoller {
   }
 
   private async ingestAudioOnlyMeeting(meeting: MeetingRow, state: PlaudIngestStateRow, detail: FileDetail): Promise<void> {
+    this.logger.debug("Ingesting audio-only Plaud recording", {
+      category: "plaud",
+      meetingId: meeting.id,
+      plaudFileId: state.plaud_file_id
+    });
     await this.ensureRecording(meeting, state, detail);
     const resolvedAt = this.now();
     await this.db

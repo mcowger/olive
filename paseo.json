@@ -25,6 +25,14 @@
     "build": {
       "type": "command",
       "command": "bun run build"
+    },
+    "deploy:staging": {
+      "type": "command",
+      "command": "bun run deploy:staging"
+    },
+    "backup": {
+      "type": "command",
+      "command": "bun run scripts/backup.ts"
     }
   },
   "metadataGeneration": {

@@ -85,6 +85,15 @@ const CREATE_TABLE_STATEMENTS = [
     is_builtin INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS logs (
+    id TEXT PRIMARY KEY,
+    level TEXT NOT NULL,
+    category TEXT NOT NULL,
+    message TEXT NOT NULL,
+    meeting_id TEXT REFERENCES meetings(id),
+    details TEXT,
+    created_at INTEGER NOT NULL
   )`
 ];
 
@@ -94,7 +103,11 @@ const CREATE_INDEX_STATEMENTS = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_recordings_provider_id ON recordings(provider, provider_recording_id) WHERE provider_recording_id IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS idx_artifacts_meeting ON artifacts(meeting_id)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_runs_meeting_stage ON stage_runs(meeting_id, stage)",
-  "CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name)"
+  "CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name)",
+  "CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)",
+  "CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category)",
+  "CREATE INDEX IF NOT EXISTS idx_logs_meeting_id ON logs(meeting_id)"
 ];
 
 const ADDITIVE_COLUMNS = [
@@ -127,7 +140,7 @@ export const DEFAULT_TEMPLATES = [
     id: "00000000-0000-0000-0000-000000000001",
     name: "Executive Summary",
     description: "Structured meeting overview with context, key discussion points, decisions made, and assigned action items.",
-    system_prompt: "You are an expert executive assistant and meeting analyst. Produce clear, structured, professional meeting summaries in Markdown format with precise speaker attribution and actionable next steps.",
+    system_prompt: "You are an expert executive assistant and meeting analyst. Produce clear, structured, professional meeting summaries in Markdown format with precise speaker attribution and actionable next steps. Do not invent, guess, or hallucinate participant names or speaker identities that are not explicitly stated in the transcript or participant list. Only attribute statements to the actual speaker labels provided in the transcript.",
     user_prompt: `# Meeting Summary: {{title}}
 **Date:** {{date}}
 **Participants:** {{speakers}}
@@ -154,7 +167,7 @@ Summarize the main purpose, high-level context, and outcome of the meeting in 2-
     id: "00000000-0000-0000-0000-000000000002",
     name: "1-on-1 Catchup",
     description: "Focused on individual priorities, project updates, blockers, feedback, and mutual commitments.",
-    system_prompt: "You are an executive coach and engineering manager summarizing a 1-on-1 meeting. Emphasize personal updates, blockers, feedback, and commitments.",
+    system_prompt: "You are an executive coach and engineering manager summarizing a 1-on-1 meeting. Emphasize personal updates, blockers, feedback, and commitments. Do not invent, guess, or hallucinate participant names or speaker identities that are not explicitly stated in the transcript or participant list. Only attribute statements to the actual speaker labels provided in the transcript.",
     user_prompt: `# 1-on-1 Summary: {{title}}
 **Date:** {{date}}
 **Participants:** {{speakers}}
@@ -181,7 +194,7 @@ Summarize the main purpose, high-level context, and outcome of the meeting in 2-
     id: "00000000-0000-0000-0000-000000000003",
     name: "Technical Architecture & Design Review",
     description: "Detailed engineering review covering architecture, technical trade-offs, scalability, and open questions.",
-    system_prompt: "You are a principal software engineer and technical architect reviewing meeting notes. Focus on architectural decisions, trade-offs, constraints, and engineering action items.",
+    system_prompt: "You are a principal software engineer and technical architect reviewing meeting notes. Focus on architectural decisions, trade-offs, constraints, and engineering action items. Do not invent, guess, or hallucinate participant names or speaker identities that are not explicitly stated in the transcript or participant list. Only attribute statements to the actual speaker labels provided in the transcript.",
     user_prompt: `# Technical Architecture Review: {{title}}
 **Date:** {{date}}
 **Participants:** {{speakers}}
@@ -211,7 +224,7 @@ Summarize the main purpose, high-level context, and outcome of the meeting in 2-
     id: "00000000-0000-0000-0000-000000000004",
     name: "Action Items & Decisions",
     description: "Concise, zero-fluff extraction of decisions made and task assignments with owners.",
-    system_prompt: "You are an agile project manager extracting strictly decisions and actionable next steps. Omit general conversational filler.",
+    system_prompt: "You are an agile project manager extracting strictly decisions and actionable next steps. Omit general conversational filler. Do not invent, guess, or hallucinate participant names or speaker identities that are not explicitly stated in the transcript or participant list.",
     user_prompt: `# Decisions & Action Items: {{title}}
 **Date:** {{date}}
 **Participants:** {{speakers}}
@@ -237,6 +250,12 @@ function seedBuiltinTemplates(db: BunDatabase): void {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
+  const updateBuiltinStmt = db.prepare(`
+    UPDATE templates
+    SET system_prompt = ?
+    WHERE id = ? AND is_builtin = 1
+  `);
+
   for (const tpl of DEFAULT_TEMPLATES) {
     insertStmt.run(
       tpl.id,
@@ -249,7 +268,29 @@ function seedBuiltinTemplates(db: BunDatabase): void {
       now,
       now
     );
+    updateBuiltinStmt.run(tpl.system_prompt, tpl.id);
   }
+}
+
+function repairCorruptedPlaudDurations(db: BunDatabase): void {
+  // If a Plaud meeting has a duration > 24h that was erroneously multiplied by 1000,
+  // repair it back to actual milliseconds.
+  db.run(`
+    UPDATE meetings
+    SET end_time = start_time + ((end_time - start_time) / 1000)
+    WHERE source = 'plaud'
+      AND (end_time - start_time) > 86400000
+      AND ((end_time - start_time) % 1000) = 0;
+  `);
+
+  db.run(`
+    UPDATE recordings
+    SET duration_ms = duration_ms / 1000
+    WHERE provider = 'plaud'
+      AND duration_ms IS NOT NULL
+      AND duration_ms > 86400000
+      AND (duration_ms % 1000) = 0;
+  `);
 }
 
 export function runMigrations(db: BunDatabase): void {
@@ -269,4 +310,5 @@ export function runMigrations(db: BunDatabase): void {
   }
 
   seedBuiltinTemplates(db);
+  repairCorruptedPlaudDurations(db);
 }

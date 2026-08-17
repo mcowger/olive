@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+
 /**
  * WAV audio parser and resampler utilities for 16kHz mono PCM
  * used by local ASR and Speaker Diarization / Embedding extractors.
@@ -8,6 +12,17 @@ export interface DecodedWav {
   sampleRate: number;
   channels: number;
   durationMs: number;
+}
+
+/**
+ * Checks if a byte buffer contains a standard RIFF/WAVE header.
+ */
+export function isWav(buffer: Uint8Array): boolean {
+  if (!buffer || buffer.byteLength < 12) return false;
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const riff = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+  const wave = String.fromCharCode(view.getUint8(8), view.getUint8(9), view.getUint8(10), view.getUint8(11));
+  return riff === "RIFF" && wave === "WAVE";
 }
 
 /**
@@ -159,6 +174,82 @@ export function resample(
   }
 
   return result;
+}
+
+/**
+ * Universally loads and decodes any audio file (WAV, MP3, M4A, AAC, FLAC, OGG, WebM)
+ * to 16kHz mono Float32Array samples using ffmpeg if non-WAV.
+ */
+export async function loadAudioSamples(
+  input: { audioPath?: string; audioBytes?: Uint8Array },
+  targetSampleRate = 16000
+): Promise<DecodedWav> {
+  // If raw bytes are provided and valid WAV
+  if (input.audioBytes && isWav(input.audioBytes)) {
+    let decoded = decodeWav(input.audioBytes);
+    if (decoded.sampleRate !== targetSampleRate) {
+      decoded = {
+        ...decoded,
+        samples: resample(decoded.samples, decoded.sampleRate, targetSampleRate),
+        sampleRate: targetSampleRate
+      };
+    }
+    return decoded;
+  }
+
+  // If audioPath is provided and is a valid WAV
+  if (input.audioPath && existsSync(input.audioPath)) {
+    try {
+      const bytes = new Uint8Array(await readFile(input.audioPath));
+      if (isWav(bytes)) {
+        let decoded = decodeWav(bytes);
+        if (decoded.sampleRate !== targetSampleRate) {
+          decoded = {
+            ...decoded,
+            samples: resample(decoded.samples, decoded.sampleRate, targetSampleRate),
+            sampleRate: targetSampleRate
+          };
+        }
+        return decoded;
+      }
+    } catch {}
+  }
+
+  // Convert non-WAV audio (mp3, m4a, etc.) to 16kHz mono 16-bit PCM WAV via ffmpeg
+  const args = [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y"
+  ];
+
+  let stdinData: Uint8Array | undefined;
+  if (input.audioPath && existsSync(input.audioPath)) {
+    args.push("-i", input.audioPath);
+  } else if (input.audioBytes) {
+    args.push("-i", "pipe:0");
+    stdinData = input.audioBytes;
+  } else {
+    throw new Error("Either audioPath or audioBytes must be provided");
+  }
+
+  args.push("-f", "wav", "-acodec", "pcm_s16le", "-ac", "1", "-ar", String(targetSampleRate), "pipe:1");
+
+  try {
+    const ff = spawnSync("ffmpeg", args, {
+      input: stdinData,
+      maxBuffer: 500 * 1024 * 1024
+    });
+
+    if (ff.status === 0 && ff.stdout && ff.stdout.length >= 44) {
+      return decodeWav(new Uint8Array(ff.stdout));
+    }
+
+    const errMsg = ff.stderr ? ff.stderr.toString().trim() : `exit code ${ff.status}`;
+    throw new Error(`ffmpeg audio conversion failed (${errMsg})`);
+  } catch (err) {
+    throw new Error(`Failed to decode audio: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**

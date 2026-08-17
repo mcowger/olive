@@ -302,6 +302,65 @@ describe("Plaud API", () => {
     await rm(customConfigDir, { recursive: true, force: true });
     await rm(customMeetingsDir, { recursive: true, force: true });
   });
+
+  test("accurately converts Plaud millisecond and second durations without erroneously inflating them", () => {
+    const { durationToMs } = require("../src/plaud/poller.ts");
+
+    // 4 minutes 12 seconds in Plaud API milliseconds (252,960 ms)
+    expect(durationToMs(252_960)).toBe(252_960);
+
+    // 7 minutes 42 seconds in Plaud API milliseconds (462,960 ms)
+    expect(durationToMs(462_960)).toBe(462_960);
+
+    // 7 minutes 46 seconds in Plaud API milliseconds (466,980 ms)
+    expect(durationToMs(466_980)).toBe(466_980);
+
+    // 1 hour in Plaud API milliseconds (3,600,000 ms)
+    expect(durationToMs(3_600_000)).toBe(3_600_000);
+
+    // Seconds fallback (< 1000)
+    expect(durationToMs(12)).toBe(12_000);
+    expect(durationToMs(0.5)).toBe(500);
+    expect(durationToMs(null)).toBe(0);
+    expect(durationToMs(undefined)).toBe(0);
+  });
+
+  test("idempotently repairs legacy inflated Plaud durations during migration", async () => {
+    const handle = createDb(":memory:");
+    const now = 1_700_000_000_000;
+    const meetingId = "corrupted-plaud-meeting";
+
+    // Insert artificially inflated duration (252,960,000 ms = 70h 16m instead of 4m 12s)
+    await handle.db
+      .insertInto("meetings")
+      .values({
+        id: meetingId,
+        title: "2026-08-14 16:26:26",
+        start_time: now,
+        end_time: now + 252_960_000,
+        source: "plaud",
+        status: "processing",
+        tags: "[]",
+        primary_transcript_artifact_id: null,
+        primary_summary_artifact_id: null,
+        last_error: null,
+        created_at: now,
+        updated_at: now
+      })
+      .execute();
+
+    const { runMigrations } = await import("@olive/shared/migrations");
+    runMigrations(handle.sqlite);
+
+    const repaired = await handle.db
+      .selectFrom("meetings")
+      .select(["start_time", "end_time"])
+      .where("id", "=", meetingId)
+      .executeTakeFirstOrThrow();
+
+    // Duration should be exactly 252,960 ms (4m 12s)
+    expect(repaired.end_time - repaired.start_time).toBe(252_960);
+  });
 });
 
 function resolveLiveTokenPath(value: string | undefined): string {

@@ -59,7 +59,7 @@ Bun.serve({
       return fetch(new Request(target, request));
     }
 
-    return new Response("Not found", { status: 404 });
+    return homepage;
   }
 });
 

@@ -13,6 +13,7 @@ import {
   AcousticFeatureEmbeddingExtractor,
   decodeWav,
   encodeWav,
+  loadAudioSamples,
   mergeVoiceprintVectors,
   normalizeVector,
   resample,
@@ -200,13 +201,9 @@ export class SpeakerService {
           if (existsSync(fullPath)) {
             try {
               const fileBytes = new Uint8Array(await readFile(fullPath));
-              if (fileBytes.byteLength >= 44) {
-                let decoded = decodeWav(fileBytes);
-                let samples = decoded.samples;
-                if (decoded.sampleRate !== 16000) {
-                  samples = resample(samples, decoded.sampleRate, 16000);
-                }
-                const emb = await this.localEmbeddingExtractor.extract(samples, 16000);
+              if (fileBytes.byteLength >= 12) {
+                const decoded = await loadAudioSamples({ audioBytes: fileBytes, audioPath: fullPath }, 16000);
+                const emb = await this.localEmbeddingExtractor.extract(decoded.samples, 16000);
                 clipVectors.push(emb);
               }
             } catch (err) {
@@ -487,12 +484,9 @@ export class SpeakerService {
           if (existsSync(audioFullPath)) {
             try {
               const audioBytes = new Uint8Array(await readFile(audioFullPath));
-              if (audioBytes.byteLength >= 44) {
-                const decoded = decodeWav(audioBytes);
-                let fullSamples = decoded.samples;
-                if (decoded.sampleRate !== 16000) {
-                  fullSamples = resample(fullSamples, decoded.sampleRate, 16000);
-                }
+              if (audioBytes.byteLength >= 12) {
+                const decoded = await loadAudioSamples({ audioPath: audioFullPath, audioBytes }, 16000);
+                const fullSamples = decoded.samples;
 
                 // Slice audio from matching speaker segments
                 const matchingSegments = segments.filter(
@@ -755,14 +749,10 @@ export class SpeakerService {
     const providerMode = options.provider ?? "both";
 
     // 2. Extract Local Voiceprint Embedding (cross-filled)
-    if ((providerMode === "local" || providerMode === "both") && options.audioBytes.byteLength >= 44) {
+    if ((providerMode === "local" || providerMode === "both") && options.audioBytes.byteLength >= 12) {
       try {
-        let decoded = decodeWav(options.audioBytes);
-        let samples = decoded.samples;
-        if (decoded.sampleRate !== 16000) {
-          samples = resample(samples, decoded.sampleRate, 16000);
-        }
-        const localEmbedding = await this.localEmbeddingExtractor.extract(samples, 16000);
+        const decoded = await loadAudioSamples({ audioBytes: options.audioBytes }, 16000);
+        const localEmbedding = await this.localEmbeddingExtractor.extract(decoded.samples, 16000);
         const existingLocalVec = existingProviderIds.local?.[0]
           ? JSON.parse(existingProviderIds.local[0])
           : undefined;

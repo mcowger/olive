@@ -240,7 +240,7 @@ export interface Transcript {
   }>;
 }
 
-export type TranscriptionProgressStage = "decoding" | "diarizing" | "transcribing" | "finalizing" | "done" | "error";
+export type TranscriptionProgressStage = "decoding" | "diarizing" | "transcribing" | "finalizing" | "done" | "error" | "cancelled";
 
 export interface TranscriptionProgressUpdate {
   stage: TranscriptionProgressStage;
@@ -411,6 +411,7 @@ export interface MeetingDetailAggregate {
   transcriptContent?: string | null;
   summaryContent?: string | null;
   summaries: MeetingSummaryItem[];
+  transcriptionProgress?: TranscriptionProgressUpdate | null;
 }
 
 export interface BackupManifestStats {

@@ -4,7 +4,7 @@ export const appConfigSchema = z.object({
   pollIntervalMinutes: z.number().int().positive().default(15),
   retranscribePlaudWhenUnnamed: z.boolean().default(false),
   transcriptionProvider: z.enum(["speechmatics", "local"]).default("local"),
-  localAsrModel: z.string().default("onnx-community/granite-4.0-1b-speech-ONNX"),
+  localAsrModel: z.string().default("ggml-org/Qwen3-ASR-1.7B-GGUF"),
   localClusteringThreshold: z.number().min(0.1).max(0.99).default(0.85),
   localSimilarityThreshold: z.number().min(0.1).max(0.99).default(0.85),
   primaryArtifactPreference: z

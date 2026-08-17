@@ -23,7 +23,7 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
 
   constructor(config: LocalAsrConfig = {}) {
     this.config = {
-      modelId: config.modelId ?? "onnx-community/granite-4.0-1b-speech-ONNX",
+      modelId: config.modelId ?? "ggml-org/Qwen3-ASR-1.7B-GGUF",
       dtype: config.dtype ?? "q4",
       device: config.device ?? "cpu",
       language: config.language ?? "en"
@@ -118,7 +118,7 @@ export class TransformersAsrEngine implements LocalAsrEngineInterface {
       return { text: "" };
     }
 
-    const modelId = options.modelId || this.config.modelId || "onnx-community/granite-4.0-1b-speech-ONNX";
+    const modelId = options.modelId || this.config.modelId || "ggml-org/Qwen3-ASR-1.7B-GGUF";
 
     // Dispatch Qwen models to supervised llama-server
     if (this.isQwenModel(modelId)) {

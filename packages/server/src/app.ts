@@ -267,7 +267,11 @@ export function createApp(options: AppOptions = {}): Hono {
     if (!detail) {
       return c.json({ error: "Meeting not found" }, 404);
     }
-    return c.json(detail);
+    const activeProgress = transcriptionService.getTranscriptionProgress(meetingId);
+    return c.json({
+      ...detail,
+      transcriptionProgress: activeProgress
+    });
   });
 
   app.get("/api/meetings/:id/audio", async (c) => {
@@ -496,6 +500,71 @@ export function createApp(options: AppOptions = {}): Hono {
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
+  });
+
+  app.get("/api/meetings/:id/transcribe/progress", async (c) => {
+    const meetingId = c.req.param("id");
+    const wantsStream =
+      c.req.query("stream") === "true" ||
+      (c.req.header("accept") || "").includes("text/event-stream");
+
+    if (wantsStream) {
+      return streamSSE(c, async (stream) => {
+        const pingInterval = setInterval(() => {
+          try {
+            void stream.writeSSE({ event: "ping", data: "{}" });
+          } catch {}
+        }, 3000);
+
+        const current = transcriptionService.getTranscriptionProgress(meetingId);
+        if (current) {
+          try {
+            await stream.writeSSE({
+              event: "progress",
+              data: JSON.stringify(current)
+            });
+          } catch {}
+        }
+
+        const unsubscribe = transcriptionService.subscribeTranscriptionProgress(
+          meetingId,
+          async (update) => {
+            try {
+              const eventName =
+                update.stage === "done"
+                  ? "result"
+                  : update.stage === "cancelled"
+                  ? "cancelled"
+                  : update.stage === "error"
+                  ? "error"
+                  : "progress";
+
+              await stream.writeSSE({
+                event: eventName,
+                data: JSON.stringify(update)
+              });
+            } catch {}
+          }
+        );
+
+        stream.onAbort(() => {
+          clearInterval(pingInterval);
+          unsubscribe();
+        });
+
+        await new Promise<void>((resolve) => {
+          stream.onAbort(() => resolve());
+        });
+      });
+    }
+
+    const progress = transcriptionService.getTranscriptionProgress(meetingId);
+    return c.json({ progress });
+  });
+
+  app.get("/api/transcriptions/active", (c) => {
+    const active = transcriptionService.getAllActiveTranscriptionProgress();
+    return c.json({ active });
   });
 
   app.post("/api/meetings/:id/transcribe/cancel", async (c) => {

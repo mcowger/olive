@@ -205,31 +205,31 @@ export function App(): ReactElement {
   }, []);
 
   return (
-    <div className="min-h-screen bg-stone-950 text-stone-100 selection:bg-lime-400 selection:text-stone-950">
-      <nav className="border-b border-stone-800 bg-stone-900/60 backdrop-blur sticky top-0 z-30 px-6 py-4">
-        <div className="mx-auto flex max-w-6xl items-center justify-between">
-          <div className="flex items-center gap-6">
+    <div className="min-h-screen bg-stone-950 text-stone-100 selection:bg-lime-400 selection:text-stone-950 w-full overflow-x-hidden">
+      <nav className="border-b border-stone-800 bg-stone-900/80 backdrop-blur sticky top-0 z-30 px-3 sm:px-6 py-2.5 sm:py-3.5 w-full">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2.5 sm:gap-4">
+          <div className="flex items-center gap-3 sm:gap-6 overflow-x-auto max-w-full pb-0.5">
             <a
               href="/meetings"
               onClick={(e) => {
                 e.preventDefault();
                 navigate("/meetings");
               }}
-              className="flex items-center gap-2 cursor-pointer hover:opacity-90 transition"
+              className="flex items-center gap-2 cursor-pointer hover:opacity-90 transition shrink-0"
             >
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-lime-400 font-bold text-stone-950 text-base">
+              <span className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-lg bg-lime-400 font-bold text-stone-950 text-sm sm:text-base">
                 O
               </span>
-              <span className="text-xl font-semibold tracking-tight">Olive</span>
+              <span className="text-lg sm:text-xl font-semibold tracking-tight">Olive</span>
             </a>
-            <div className="flex items-center gap-1 rounded-lg bg-stone-800/80 p-1 text-sm font-medium">
+            <div className="flex items-center gap-0.5 sm:gap-1 rounded-lg bg-stone-800/80 p-0.5 sm:p-1 text-xs sm:text-sm font-medium shrink-0">
               <a
                 href="/meetings"
                 onClick={(e) => {
                   e.preventDefault();
                   navigate("/meetings");
                 }}
-                className={`rounded-md px-3 py-1.5 transition ${
+                className={`rounded-md px-2.5 sm:px-3 py-1 sm:py-1.5 transition ${
                   activeTab === "meetings" && !selectedMeetingId
                     ? "bg-stone-900 text-lime-400 shadow"
                     : "text-stone-400 hover:text-stone-200"
@@ -244,7 +244,7 @@ export function App(): ReactElement {
                   navigate("/people");
                   void refreshSpeakers();
                 }}
-                className={`rounded-md px-3 py-1.5 transition ${
+                className={`rounded-md px-2.5 sm:px-3 py-1 sm:py-1.5 transition ${
                   activeTab === "speakers"
                     ? "bg-stone-900 text-lime-400 shadow"
                     : "text-stone-400 hover:text-stone-200"
@@ -258,7 +258,7 @@ export function App(): ReactElement {
                   e.preventDefault();
                   navigate("/templates");
                 }}
-                className={`rounded-md px-3 py-1.5 transition ${
+                className={`rounded-md px-2.5 sm:px-3 py-1 sm:py-1.5 transition ${
                   activeTab === "templates"
                     ? "bg-stone-900 text-lime-400 shadow"
                     : "text-stone-400 hover:text-stone-200"
@@ -272,7 +272,7 @@ export function App(): ReactElement {
                   e.preventDefault();
                   navigate("/logs");
                 }}
-                className={`rounded-md px-3 py-1.5 transition ${
+                className={`rounded-md px-2.5 sm:px-3 py-1 sm:py-1.5 transition ${
                   activeTab === "logs"
                     ? "bg-stone-900 text-lime-400 shadow"
                     : "text-stone-400 hover:text-stone-200"
@@ -286,24 +286,24 @@ export function App(): ReactElement {
                   e.preventDefault();
                   navigate("/backup");
                 }}
-                className={`rounded-md px-3 py-1.5 transition ${
+                className={`rounded-md px-2.5 sm:px-3 py-1 sm:py-1.5 transition ${
                   activeTab === "backup"
                     ? "bg-stone-900 text-lime-400 shadow"
                     : "text-stone-400 hover:text-stone-200"
                 }`}
               >
-                Backup & Restore
+                Backup
               </a>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => setShowLlmModal(true)}
-              className="flex items-center gap-2 rounded-full border border-stone-700 bg-stone-800/80 px-3 py-1 text-xs font-medium text-stone-300 hover:border-stone-500 hover:text-white transition"
+              className="flex items-center gap-1.5 rounded-full border border-stone-700 bg-stone-800/80 px-2.5 py-1 text-[11px] sm:text-xs font-medium text-stone-300 hover:border-stone-500 hover:text-white transition truncate max-w-[150px] sm:max-w-none"
             >
-              <span className="h-2 w-2 rounded-full bg-cyan-400" />
-              <span>AI: {llmConfig ? `${llmConfig.defaultProvider}/${llmConfig.defaultModel}` : "Configure LLM"}</span>
+              <span className="h-2 w-2 rounded-full bg-cyan-400 shrink-0" />
+              <span className="truncate">AI: {llmConfig ? `${llmConfig.defaultProvider}/${llmConfig.defaultModel}` : "Config"}</span>
             </button>
             <button
               type="button"
@@ -311,20 +311,20 @@ export function App(): ReactElement {
                 setShowPlaudModal(true);
                 void refreshPlaudStatus();
               }}
-              className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium transition ${
+              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] sm:text-xs font-medium transition shrink-0 ${
                 plaudStatus?.connected
                   ? "border-lime-400/30 bg-lime-400/10 text-lime-300 hover:bg-lime-400/20"
                   : "border-amber-400/30 bg-amber-400/10 text-amber-300 hover:bg-amber-400/20"
               }`}
             >
-              <span className={`h-2 w-2 rounded-full ${plaudStatus?.connected ? "bg-lime-400" : "bg-amber-400"}`} />
-              {plaudStatus?.connected ? "Plaud Connected" : "Connect Plaud"}
+              <span className={`h-2 w-2 rounded-full shrink-0 ${plaudStatus?.connected ? "bg-lime-400" : "bg-amber-400"}`} />
+              <span>{plaudStatus?.connected ? "Plaud" : "Connect"}</span>
             </button>
           </div>
         </div>
       </nav>
 
-      <main className="mx-auto max-w-6xl px-6 py-8">
+      <main className="mx-auto max-w-6xl px-3.5 sm:px-6 py-4 sm:py-8 w-full overflow-x-hidden min-w-0">
         {selectedMeetingId ? (
           <MeetingDetailView
             meetingId={selectedMeetingId}
@@ -635,6 +635,7 @@ function PlaudModal({
 
 function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) => void }): ReactElement {
   const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
+  const [activeProgressMap, setActiveProgressMap] = useState<Record<string, TranscriptionProgressUpdate>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -645,10 +646,17 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
     setError(null);
     try {
       const url = search.trim() ? `/api/meetings?search=${encodeURIComponent(search.trim())}` : "/api/meetings";
-      const res = await fetch(url);
+      const [res, activeRes] = await Promise.all([
+        fetch(url),
+        fetch("/api/transcriptions/active").catch(() => null)
+      ]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as MeetingsResponse;
       setMeetings(data.meetings);
+      if (activeRes && activeRes.ok) {
+        const activeData = await activeRes.json();
+        setActiveProgressMap(activeData.active || {});
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load meetings");
     } finally {
@@ -659,6 +667,31 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
   useEffect(() => {
     void fetchMeetings();
   }, [search]);
+
+  // Poll active transcriptions every 2.5s if any meeting is processing
+  useEffect(() => {
+    const hasProcessing = meetings.some((m) => m.status === "processing") || Object.keys(activeProgressMap).length > 0;
+    if (!hasProcessing) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const [activeRes, meetingsRes] = await Promise.all([
+          fetch("/api/transcriptions/active"),
+          fetch("/api/meetings")
+        ]);
+        if (activeRes.ok) {
+          const activeData = await activeRes.json();
+          setActiveProgressMap(activeData.active || {});
+        }
+        if (meetingsRes.ok) {
+          const mData = await meetingsRes.json();
+          setMeetings(mData.meetings || []);
+        }
+      } catch {}
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [meetings, activeProgressMap]);
 
   return (
     <div className="space-y-6">
@@ -700,7 +733,7 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
             <div
               key={meeting.id}
               onClick={() => onSelectMeeting(meeting.id)}
-              className="group cursor-pointer rounded-xl border border-stone-800 bg-stone-900/90 p-5 transition hover:border-lime-400/60 hover:bg-stone-900 shadow-sm"
+              className="group cursor-pointer rounded-xl border border-stone-800 bg-stone-900/90 p-5 transition hover:border-lime-400/60 hover:bg-stone-900 shadow-sm space-y-2.5"
             >
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -716,17 +749,24 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span
-                    className={`rounded-full px-3 py-1 text-xs font-medium capitalize ${
-                      meeting.status === "ready"
-                        ? "bg-lime-400/10 text-lime-300 border border-lime-400/20"
-                        : meeting.status === "processing"
-                        ? "bg-amber-400/10 text-amber-300 border border-amber-400/20"
-                        : "bg-stone-800 text-stone-300"
-                    }`}
-                  >
-                    {meeting.status}
-                  </span>
+                  {activeProgressMap[meeting.id] ? (
+                    <div className="flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-950/40 px-3 py-1 text-xs text-amber-200">
+                      <span className="h-2 w-2 rounded-full bg-amber-400 animate-ping" />
+                      <span className="font-semibold">{activeProgressMap[meeting.id].stage} ({activeProgressMap[meeting.id].percent}%)</span>
+                    </div>
+                  ) : (
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-medium capitalize ${
+                        meeting.status === "ready"
+                          ? "bg-lime-400/10 text-lime-300 border border-lime-400/20"
+                          : meeting.status === "processing"
+                          ? "bg-amber-400/10 text-amber-300 border border-amber-400/20 animate-pulse"
+                          : "bg-stone-800 text-stone-300"
+                      }`}
+                    >
+                      {meeting.status}
+                    </span>
+                  )}
                   {meeting.primaryTranscriptArtifactId && (
                     <span className="rounded-full bg-stone-800 px-2.5 py-1 text-xs text-stone-300">
                       Transcript
@@ -734,6 +774,21 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
                   )}
                 </div>
               </div>
+
+              {activeProgressMap[meeting.id] && (
+                <div className="pt-1 space-y-1">
+                  <div className="flex justify-between text-[11px] text-stone-400">
+                    <span className="truncate max-w-[80%]">{activeProgressMap[meeting.id].message}</span>
+                    <span className="font-mono text-amber-300 font-bold">{activeProgressMap[meeting.id].percent}%</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-stone-800">
+                    <div
+                      className="h-full bg-gradient-to-r from-amber-500 to-lime-400 transition-all duration-300"
+                      style={{ width: `${Math.max(5, activeProgressMap[meeting.id].percent)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -770,7 +825,7 @@ function MeetingDetailView({
   const [cancellingTranscription, setCancellingTranscription] = useState(false);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionProgressUpdate | null>(null);
   const transcriptionAbortRef = useRef<AbortController | null>(null);
-  const [selectedEngine, setSelectedEngine] = useState<string>("local:granite");
+  const [selectedEngine, setSelectedEngine] = useState<string>("local:qwen");
   const [showDiarizationSettings, setShowDiarizationSettings] = useState(false);
   const [customClusteringThreshold, setCustomClusteringThreshold] = useState(0.85);
   const [customSimilarityThreshold, setCustomSimilarityThreshold] = useState(0.85);
@@ -796,6 +851,14 @@ function MeetingDetailView({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as MeetingDetailResponse;
       setDetail(data);
+      if (data.transcriptionProgress) {
+        setTranscriptionProgress(data.transcriptionProgress);
+        setTranscribing(true);
+      } else if (data.meeting?.status === "processing") {
+        setTranscribing(true);
+      } else if (data.meeting?.status === "ready") {
+        setTranscribing(false);
+      }
       if (data.summaries && data.summaries.length > 0) {
         const primary = data.summaries.find((s) => s.isPrimary);
         setSelectedSummaryId((prev) => prev || primary?.id || data.summaries[0].id);
@@ -804,12 +867,12 @@ function MeetingDetailView({
         const cfg = await cfgRes.json();
         if (cfg.localClusteringThreshold !== undefined) setCustomClusteringThreshold(cfg.localClusteringThreshold);
         if (cfg.localSimilarityThreshold !== undefined) setCustomSimilarityThreshold(cfg.localSimilarityThreshold);
-        if (cfg.localAsrModel?.includes("qwen")) {
-          setSelectedEngine("local:qwen");
+        if (cfg.localAsrModel?.includes("granite")) {
+          setSelectedEngine("local:granite");
         } else if (cfg.localAsrModel?.includes("cohere")) {
           setSelectedEngine("local:cohere");
-        } else if (cfg.localAsrModel?.includes("granite")) {
-          setSelectedEngine("local:granite");
+        } else {
+          setSelectedEngine("local:qwen");
         }
       }
     } catch (err) {
@@ -821,6 +884,66 @@ function MeetingDetailView({
 
   useEffect(() => {
     void fetchDetail();
+
+    let eventSource: EventSource | null = null;
+    let isClosed = false;
+
+    const connectProgress = () => {
+      try {
+        eventSource = new EventSource(`/api/meetings/${meetingId}/transcribe/progress?stream=true`);
+
+        eventSource.addEventListener("progress", (e) => {
+          if (isClosed) return;
+          try {
+            const data = JSON.parse(e.data);
+            setTranscriptionProgress(data);
+            setTranscribing(true);
+          } catch {}
+        });
+
+        eventSource.addEventListener("result", (e) => {
+          if (isClosed) return;
+          try {
+            const data = JSON.parse(e.data);
+            setTranscriptionProgress(data);
+          } catch {}
+          setTranscribing(false);
+          void fetchDetail();
+          setTimeout(() => {
+            if (!isClosed) setTranscriptionProgress(null);
+          }, 3500);
+        });
+
+        eventSource.addEventListener("cancelled", () => {
+          if (isClosed) return;
+          setTranscriptionProgress({
+            stage: "done",
+            percent: 0,
+            message: "Transcription was cancelled."
+          });
+          setTranscribing(false);
+          void fetchDetail();
+          setTimeout(() => {
+            if (!isClosed) setTranscriptionProgress(null);
+          }, 2500);
+        });
+
+        eventSource.addEventListener("error", () => {
+          // auto reconnect
+        });
+      } catch (err) {
+        console.warn("Could not connect to SSE progress stream:", err);
+      }
+    };
+
+    connectProgress();
+
+    return () => {
+      isClosed = true;
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
   }, [meetingId]);
 
   const handleCancelTranscription = async () => {
@@ -863,11 +986,11 @@ function MeetingDetailView({
     });
 
     const isLocal = selectedEngine.startsWith("local");
-    const modelId = selectedEngine === "local:qwen"
-      ? "tonythethompson/Qwen3-ASR-1.7B-ONNX"
+    const modelId = selectedEngine === "local:granite"
+      ? "onnx-community/granite-4.0-1b-speech-ONNX"
       : selectedEngine === "local:cohere"
       ? "onnx-community/cohere-transcribe-03-2026-ONNX"
-      : "onnx-community/granite-4.0-1b-speech-ONNX";
+      : "ggml-org/Qwen3-ASR-1.7B-GGUF";
 
     try {
       const res = await fetch(`/api/meetings/${meetingId}/transcribe?stream=true`, {
@@ -1144,10 +1267,10 @@ function MeetingDetailView({
 
       {detail && (
         <div className="space-y-8">
-          <header className="flex flex-col gap-4 border-b border-stone-800 pb-6 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h1 className="text-3xl font-bold tracking-tight">{detail.meeting.title}</h1>
-              <div className="mt-2 flex items-center gap-3 text-sm text-stone-400">
+          <header className="flex flex-col gap-4 border-b border-stone-800 pb-6 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight break-words">{detail.meeting.title}</h1>
+              <div className="mt-2 flex flex-wrap items-center gap-2 sm:gap-3 text-xs sm:text-sm text-stone-400">
                 <span>{formatDate(detail.meeting.startTime)}</span>
                 <span>•</span>
                 <span>{formatDuration(detail.meeting.endTime - detail.meeting.startTime)}</span>
@@ -1155,77 +1278,73 @@ function MeetingDetailView({
                 <span className="capitalize">{detail.meeting.source}</span>
               </div>
             </div>
-            <div className="flex flex-col sm:flex-row items-end sm:items-center gap-3">
-              <div className="flex items-center gap-2">
-                <select
-                  value={selectedEngine}
-                  onChange={(e) => setSelectedEngine(e.target.value)}
-                  className="rounded-lg border border-stone-800 bg-stone-900 px-3 py-2 text-xs text-stone-200 focus:border-lime-400 focus:outline-none"
-                >
-                  <option value="local:granite">Local (IBM Granite Speech + Diarization)</option>
-                  <option value="local:qwen">Local (Qwen3-ASR 1.7B + Diarization)</option>
-                  <option value="local:cohere">Local (Cohere Transcribe + Diarization)</option>
-                  <option value="speechmatics">Speechmatics (Cloud)</option>
-                </select>
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              <select
+                value={selectedEngine}
+                onChange={(e) => setSelectedEngine(e.target.value)}
+                className="rounded-lg border border-stone-800 bg-stone-900 px-3 py-2 text-xs text-stone-200 focus:border-lime-400 focus:outline-none max-w-full"
+              >
+                <option value="local:qwen">Local (Qwen3-ASR 1.7B + Diarization) (Default)</option>
+                <option value="local:granite">Local (IBM Granite Speech + Diarization)</option>
+                <option value="local:cohere">Local (Cohere Transcribe + Diarization)</option>
+                <option value="speechmatics">Speechmatics (Cloud)</option>
+              </select>
 
-                {selectedEngine.startsWith("local") && (
-                  <button
-                    type="button"
-                    onClick={() => setShowDiarizationSettings(!showDiarizationSettings)}
-                    className={`rounded-lg border px-2.5 py-2 text-xs font-mono transition ${
-                      showDiarizationSettings
-                        ? "border-lime-400 bg-lime-400/20 text-lime-300"
-                        : "border-stone-800 bg-stone-900 text-stone-400 hover:text-stone-200"
-                    }`}
-                    title="Configure local diarization thresholds"
-                  >
-                    ⚙️ Thresholds
-                  </button>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2">
+              {selectedEngine.startsWith("local") && (
                 <button
                   type="button"
-                  disabled={transcribing}
-                  onClick={() => void handleTriggerTranscription()}
-                  className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-75 disabled:cursor-not-allowed shadow-md"
+                  onClick={() => setShowDiarizationSettings(!showDiarizationSettings)}
+                  className={`rounded-lg border px-2.5 py-2 text-xs font-mono transition shrink-0 ${
+                    showDiarizationSettings
+                      ? "border-lime-400 bg-lime-400/20 text-lime-300"
+                      : "border-stone-800 bg-stone-900 text-stone-400 hover:text-stone-200"
+                  }`}
+                  title="Configure local diarization thresholds"
                 >
-                  {transcribing && (
-                    <svg className="h-4 w-4 animate-spin text-stone-950" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                    </svg>
-                  )}
-                  <span>
-                    {transcribing
-                      ? transcriptionProgress
-                        ? transcriptionProgress.stage === "diarizing"
-                          ? `Diarizing (${transcriptionProgress.percent || 15}%)…`
-                          : transcriptionProgress.stage === "decoding"
-                          ? "Enhancing Audio…"
-                          : `Transcribing (${transcriptionProgress.percent || 25}%)…`
-                        : "Transcribing…"
-                      : "Transcribe"}
-                  </span>
+                  ⚙️ Thresholds
                 </button>
+              )}
 
+              <button
+                type="button"
+                disabled={transcribing}
+                onClick={() => void handleTriggerTranscription()}
+                className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-75 disabled:cursor-not-allowed shadow-md shrink-0"
+              >
                 {transcribing && (
-                  <button
-                    type="button"
-                    disabled={cancellingTranscription}
-                    onClick={() => void handleCancelTranscription()}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/20 hover:border-rose-500/60 disabled:opacity-50 shadow-md"
-                    title="Cancel inflight transcription"
-                  >
-                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="18" y1="6" x2="6" y2="18"></line>
-                      <line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
-                    <span>{cancellingTranscription ? "Cancelling…" : "Cancel"}</span>
-                  </button>
+                  <svg className="h-4 w-4 animate-spin text-stone-950" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
                 )}
-              </div>
+                <span>
+                  {transcribing
+                    ? transcriptionProgress
+                      ? transcriptionProgress.stage === "diarizing"
+                        ? `Diarizing (${transcriptionProgress.percent || 15}%)…`
+                        : transcriptionProgress.stage === "decoding"
+                        ? "Enhancing Audio…"
+                        : `Transcribing (${transcriptionProgress.percent || 25}%)…`
+                      : "Transcribing…"
+                    : "Transcribe"}
+                </span>
+              </button>
+
+              {transcribing && (
+                <button
+                  type="button"
+                  disabled={cancellingTranscription}
+                  onClick={() => void handleCancelTranscription()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/20 hover:border-rose-500/60 disabled:opacity-50 shadow-md shrink-0"
+                  title="Cancel inflight transcription"
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                  <span>{cancellingTranscription ? "Cancelling…" : "Cancel"}</span>
+                </button>
+              )}
             </div>
           </header>
 
@@ -1396,13 +1515,13 @@ function MeetingDetailView({
 
           {/* Audio Player if recording exists */}
           {detail.recordings.length > 0 && (
-            <section className="sticky top-2 z-40 rounded-xl border border-stone-800 bg-stone-900/95 backdrop-blur p-3.5 space-y-2.5 shadow-2xl">
+            <section className="rounded-xl border border-stone-800 bg-stone-900/90 p-3.5 sm:p-4 space-y-2.5 shadow-lg w-full max-w-full min-w-0 overflow-hidden">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-400">
-                <div className="flex items-center gap-3">
-                  <span className="font-semibold uppercase tracking-wider text-stone-300">Recording Audio</span>
-                  <span>{detail.recordings[0].mime} • {(detail.recordings[0].sizeBytes / 1024 / 1024).toFixed(2)} MB</span>
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
+                  <span className="font-semibold uppercase tracking-wider text-stone-300 shrink-0">Recording Audio</span>
+                  <span className="truncate">{detail.recordings[0].mime} • {(detail.recordings[0].sizeBytes / 1024 / 1024).toFixed(2)} MB</span>
                   {playingSegmentIndex !== null && (
-                    <span className="inline-flex items-center gap-1.5 rounded bg-lime-500/20 px-2 py-0.5 text-[11px] font-semibold text-lime-300 border border-lime-500/40 animate-pulse">
+                    <span className="inline-flex items-center gap-1.5 rounded bg-lime-500/20 px-2 py-0.5 text-[11px] font-semibold text-lime-300 border border-lime-500/40 animate-pulse shrink-0">
                       <span>▶ Playing turn #{playingSegmentIndex + 1}</span>
                     </span>
                   )}
@@ -1422,7 +1541,7 @@ function MeetingDetailView({
                       }
                     }, 50);
                   }}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition shrink-0 ${
                     enhancedAudio
                       ? "border-lime-400/40 bg-lime-400/10 text-lime-300 hover:bg-lime-400/20"
                       : "border-stone-700 bg-stone-800 text-stone-400 hover:text-stone-200"
@@ -1436,7 +1555,7 @@ function MeetingDetailView({
                 ref={audioRef}
                 controls
                 src={`/api/meetings/${meetingId}/audio?enhanced=${enhancedAudio}`}
-                className="w-full h-10 rounded"
+                className="w-full max-w-full h-10 rounded"
                 onTimeUpdate={() => {
                   if (audioRef.current && playbackStopMsRef.current !== null) {
                     if (audioRef.current.currentTime >= playbackStopMsRef.current / 1000) {
@@ -1605,103 +1724,112 @@ function MeetingDetailView({
           </section>
 
           {/* Transcript Viewer */}
-          <section className="space-y-4">
+          <section className="space-y-4 w-full max-w-full min-w-0">
             <h2 className="text-xl font-semibold tracking-tight">Transcript</h2>
 
             {parsedTranscriptSegments.length > 0 ? (
-              <div className="space-y-4 rounded-xl border border-stone-800 bg-stone-900/60 p-6">
+              <div className="space-y-3 sm:space-y-4 rounded-xl border border-stone-800 bg-stone-900/60 p-3 sm:p-6 w-full max-w-full min-w-0">
                 {parsedTranscriptSegments.map((seg, idx) => (
-                  <div key={idx} className="group flex gap-4 rounded-lg p-2 transition hover:bg-stone-800/30">
-                    <button
-                      type="button"
-                      onClick={() => handlePlaySegment(seg, idx)}
-                      title={playingSegmentIndex === idx ? "Pause playback" : "Play only this turn"}
-                      className={`w-20 shrink-0 pt-0.5 text-xs font-mono transition text-left cursor-pointer flex items-center gap-1 ${
-                        playingSegmentIndex === idx
-                          ? "text-lime-300 font-bold"
-                          : "text-stone-500 hover:text-lime-400"
-                      }`}
-                    >
-                      <span>{playingSegmentIndex === idx ? "⏸" : "▶"}</span>
-                      <span>{formatTimeOffset(seg.startMs)}</span>
-                    </button>
-                    <div className="flex-1 space-y-1">
-                      <div className="flex items-center gap-2">
+                  <div
+                    key={idx}
+                    className="group rounded-xl border border-stone-800/70 bg-stone-900/40 p-3 sm:p-4 transition hover:border-stone-700 hover:bg-stone-900/80 space-y-2 w-full max-w-full min-w-0"
+                  >
+                    {/* Header: Play/Timestamp + Speaker Badge + Action Buttons */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-800/50 pb-2">
+                      <div className="flex flex-wrap items-center gap-2 min-w-0">
+                        {/* Play / Timestamp button */}
+                        <button
+                          type="button"
+                          onClick={() => handlePlaySegment(seg, idx)}
+                          title={playingSegmentIndex === idx ? "Pause playback" : "Play only this turn"}
+                          className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-mono transition cursor-pointer shrink-0 ${
+                            playingSegmentIndex === idx
+                              ? "bg-lime-400/20 text-lime-300 font-bold border border-lime-400/40 shadow-sm"
+                              : "bg-stone-800/90 text-stone-400 hover:text-lime-300 hover:bg-stone-800 border border-stone-700/70"
+                          }`}
+                        >
+                          <span className="text-[10px]">{playingSegmentIndex === idx ? "⏸" : "▶"}</span>
+                          <span>{formatTimeOffset(seg.startMs)}</span>
+                        </button>
+
+                        {/* Speaker Badge */}
                         {seg.verified ? (
                           <span
-                            className="inline-flex items-center gap-1 rounded bg-lime-500/20 px-2 py-0.5 text-xs font-semibold text-lime-300 border border-lime-500/40"
+                            className="inline-flex items-center gap-1 rounded-md bg-lime-500/20 px-2 py-0.5 text-xs font-semibold text-lime-300 border border-lime-500/40 truncate max-w-[180px] sm:max-w-none"
                             title="Speaker verified & voiceprint trained"
                           >
                             <span>✓</span>
-                            <span>{seg.speaker}</span>
+                            <span className="truncate">{seg.speaker}</span>
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 rounded bg-stone-800 px-2 py-0.5 text-xs font-semibold text-stone-300 border border-stone-700">
-                            {seg.speaker}
+                          <span className="inline-flex items-center gap-1 rounded-md bg-stone-800 px-2 py-0.5 text-xs font-semibold text-stone-300 border border-stone-700 truncate max-w-[180px] sm:max-w-none">
+                            <span className="truncate">{seg.speaker}</span>
                           </span>
                         )}
-
-                        {/* Quick Verification, Splitting & Correction Actions */}
-                        <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition-opacity">
-                          {!seg.verified && seg.speaker !== "Unknown" && (
-                            <button
-                              type="button"
-                              onClick={() => void handleConfirmSegment(seg.segmentIndex)}
-                              title={`Confirm "${seg.speaker}" is correct & update voiceprint`}
-                              className="rounded bg-lime-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-lime-400 border border-lime-500/30 hover:bg-lime-500 hover:text-stone-950 transition"
-                            >
-                              ✓ Confirm
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            onClick={() => setReassigningSpeaker({ speaker: seg.speaker, segmentIndex: seg.segmentIndex })}
-                            title="Change speaker for this turn or all turns"
-                            className="rounded bg-stone-800 px-1.5 py-0.5 text-[11px] font-medium text-stone-300 border border-stone-700 hover:bg-stone-700 hover:text-stone-100 transition"
-                          >
-                            ✎ Change
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setSplittingSegment(seg)}
-                            title="Split this turn into two separate segments"
-                            className="rounded bg-stone-800 px-1.5 py-0.5 text-[11px] font-medium text-amber-400 border border-stone-700 hover:bg-amber-400 hover:text-stone-950 transition"
-                          >
-                            ✂ Split
-                          </button>
-
-                          {idx < parsedTranscriptSegments.length - 1 && (
-                            <button
-                              type="button"
-                              onClick={() => void handleMergeWithNext(seg.segmentIndex)}
-                              title="Merge this turn with the following turn"
-                              className="rounded bg-stone-800 px-1.5 py-0.5 text-[11px] font-medium text-stone-400 border border-stone-700 hover:bg-stone-700 hover:text-stone-200 transition"
-                            >
-                              ⛓ Merge
-                            </button>
-                          )}
-
-                          {seg.speaker !== "Unknown" && (
-                            <button
-                              type="button"
-                              onClick={() => void handleUnassignSegment(seg.segmentIndex)}
-                              title="Mark as incorrect (reset to Unknown speaker)"
-                              className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[11px] font-medium text-rose-400 border border-rose-500/30 hover:bg-rose-500 hover:text-stone-950 transition"
-                            >
-                              ✕ Wrong
-                            </button>
-                          )}
-                        </div>
                       </div>
-                      <p className="text-sm leading-relaxed text-stone-200">{seg.text}</p>
+
+                      {/* Turn Action Buttons */}
+                      <div className="flex flex-wrap items-center gap-1">
+                        {!seg.verified && seg.speaker !== "Unknown" && (
+                          <button
+                            type="button"
+                            onClick={() => void handleConfirmSegment(seg.segmentIndex)}
+                            title={`Confirm "${seg.speaker}" is correct & update voiceprint`}
+                            className="rounded bg-lime-500/10 px-2 py-0.5 text-[11px] font-semibold text-lime-400 border border-lime-500/30 hover:bg-lime-500 hover:text-stone-950 transition"
+                          >
+                            ✓ Confirm
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => setReassigningSpeaker({ speaker: seg.speaker, segmentIndex: seg.segmentIndex })}
+                          title="Change speaker for this turn or all turns"
+                          className="rounded bg-stone-800 px-2 py-0.5 text-[11px] font-medium text-stone-300 border border-stone-700/80 hover:bg-stone-700 hover:text-stone-100 transition"
+                        >
+                          ✎ Change
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setSplittingSegment(seg)}
+                          title="Split this turn into two separate segments"
+                          className="rounded bg-stone-800 px-2 py-0.5 text-[11px] font-medium text-amber-400 border border-stone-700/80 hover:bg-amber-400 hover:text-stone-950 transition"
+                        >
+                          ✂ Split
+                        </button>
+
+                        {idx < parsedTranscriptSegments.length - 1 && (
+                          <button
+                            type="button"
+                            onClick={() => void handleMergeWithNext(seg.segmentIndex)}
+                            title="Merge this turn with the following turn"
+                            className="rounded bg-stone-800 px-2 py-0.5 text-[11px] font-medium text-stone-400 border border-stone-700/80 hover:bg-stone-700 hover:text-stone-200 transition"
+                          >
+                            ⛓ Merge
+                          </button>
+                        )}
+
+                        {seg.speaker !== "Unknown" && (
+                          <button
+                            type="button"
+                            onClick={() => void handleUnassignSegment(seg.segmentIndex)}
+                            title="Mark as incorrect (reset to Unknown speaker)"
+                            className="rounded bg-rose-500/10 px-2 py-0.5 text-[11px] font-medium text-rose-400 border border-rose-500/30 hover:bg-rose-500 hover:text-stone-950 transition"
+                          >
+                            ✕ Wrong
+                          </button>
+                        )}
+                      </div>
                     </div>
+
+                    {/* Turn Content */}
+                    <p className="text-sm leading-relaxed text-stone-200 pl-0.5 break-words">{seg.text}</p>
                   </div>
                 ))}
               </div>
             ) : detail.transcriptContent ? (
-              <pre className="whitespace-pre-wrap rounded-xl border border-stone-800 bg-stone-900/60 p-6 text-sm font-sans text-stone-200">
+              <pre className="whitespace-pre-wrap rounded-xl border border-stone-800 bg-stone-900/60 p-4 sm:p-6 text-sm font-sans text-stone-200 break-words overflow-x-auto">
                 {detail.transcriptContent}
               </pre>
             ) : (
@@ -2459,7 +2587,7 @@ function UploadAudioModal({
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [autoTranscribe, setAutoTranscribe] = useState(true);
-  const [selectedEngine, setSelectedEngine] = useState<string>("local:granite");
+  const [selectedEngine, setSelectedEngine] = useState<string>("local:qwen");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -2494,11 +2622,11 @@ function UploadAudioModal({
     if (isLocal) {
       formData.append(
         "modelId",
-        selectedEngine === "local:qwen"
-          ? "tonythethompson/Qwen3-ASR-1.7B-ONNX"
+        selectedEngine === "local:granite"
+          ? "onnx-community/granite-4.0-1b-speech-ONNX"
           : selectedEngine === "local:cohere"
           ? "onnx-community/cohere-transcribe-03-2026-ONNX"
-          : "onnx-community/granite-4.0-1b-speech-ONNX"
+          : "ggml-org/Qwen3-ASR-1.7B-GGUF"
       );
     }
 
@@ -2588,8 +2716,8 @@ function UploadAudioModal({
                   onChange={(e) => setSelectedEngine(e.target.value)}
                   className="w-full rounded border border-stone-700 bg-stone-900 px-2 py-1 text-xs text-stone-200"
                 >
+                  <option value="local:qwen">Local: Qwen3-ASR 1.7B (GGUF + Diarizer) (Default)</option>
                   <option value="local:granite">Local: IBM Granite Speech (ONNX + Diarizer)</option>
-                  <option value="local:qwen">Local: Qwen3-ASR 1.7B (ONNX + Diarizer)</option>
                   <option value="local:cohere">Local: Cohere Transcribe (ONNX + Diarizer)</option>
                   <option value="speechmatics">Speechmatics (Cloud API)</option>
                 </select>
@@ -3338,7 +3466,7 @@ function LlmSettingsModal({
   const [baseUrl, setBaseUrl] = useState<string>("");
   const [localClusteringThreshold, setLocalClusteringThreshold] = useState<number>(0.85);
   const [localSimilarityThreshold, setLocalSimilarityThreshold] = useState<number>(0.85);
-  const [localAsrModel, setLocalAsrModel] = useState<string>("onnx-community/granite-4.0-1b-speech-ONNX");
+  const [localAsrModel, setLocalAsrModel] = useState<string>("ggml-org/Qwen3-ASR-1.7B-GGUF");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshingCatalog, setRefreshingCatalog] = useState(false);
@@ -3690,11 +3818,11 @@ function LlmSettingsModal({
                   onChange={(e) => setLocalAsrModel(e.target.value)}
                   className="w-full rounded-lg border border-stone-700 bg-stone-900 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none"
                 >
-                  <option value="onnx-community/granite-4.0-1b-speech-ONNX">
-                    IBM Granite Speech 4.0 1B (Recommended — High Accuracy Multilingual ASR)
+                  <option value="ggml-org/Qwen3-ASR-1.7B-GGUF">
+                    Qwen3-ASR 1.7B (Default — Fast & Multilingual GGUF/Vulkan)
                   </option>
-                  <option value="tonythethompson/Qwen3-ASR-1.7B-ONNX">
-                    Qwen3-ASR 1.7B (INT4 ONNX — 52 Languages & Accents)
+                  <option value="onnx-community/granite-4.0-1b-speech-ONNX">
+                    IBM Granite Speech 4.0 1B (ONNX CPU Quantized)
                   </option>
                   <option value="onnx-community/cohere-transcribe-03-2026-ONNX">
                     Cohere Transcribe (03-2026 ONNX)

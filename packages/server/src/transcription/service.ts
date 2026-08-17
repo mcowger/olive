@@ -92,6 +92,8 @@ export class TranscriptionService {
   private readonly now: () => number;
   private summaryService?: SummaryService;
   private readonly activeJobs = new Map<string, ActiveTranscriptionJob>();
+  private readonly activeProgress = new Map<string, TranscriptionProgressUpdate>();
+  private readonly progressListeners = new Map<string, Set<(update: TranscriptionProgressUpdate) => void>>();
 
   constructor(options: TranscriptionServiceOptions) {
     this.db = options.db;
@@ -106,6 +108,59 @@ export class TranscriptionService {
     this.webhookSecret = options.webhookSecret;
     this.now = options.now ?? Date.now;
     this.summaryService = options.summaryService;
+  }
+
+  emitProgress(meetingId: string, update: TranscriptionProgressUpdate): void {
+    if (update.stage === "done" || update.stage === "error" || update.stage === "cancelled") {
+      this.activeProgress.set(meetingId, update);
+      setTimeout(() => {
+        if (this.activeProgress.get(meetingId) === update) {
+          this.activeProgress.delete(meetingId);
+        }
+      }, 10_000);
+    } else {
+      this.activeProgress.set(meetingId, update);
+    }
+
+    const listeners = this.progressListeners.get(meetingId);
+    if (listeners) {
+      for (const listener of listeners) {
+        try {
+          listener(update);
+        } catch {}
+      }
+    }
+  }
+
+  getTranscriptionProgress(meetingId: string): TranscriptionProgressUpdate | null {
+    return this.activeProgress.get(meetingId) ?? null;
+  }
+
+  getAllActiveTranscriptionProgress(): Record<string, TranscriptionProgressUpdate> {
+    const result: Record<string, TranscriptionProgressUpdate> = {};
+    for (const [id, prog] of this.activeProgress.entries()) {
+      result[id] = prog;
+    }
+    return result;
+  }
+
+  subscribeTranscriptionProgress(
+    meetingId: string,
+    listener: (update: TranscriptionProgressUpdate) => void
+  ): () => void {
+    let set = this.progressListeners.get(meetingId);
+    if (!set) {
+      set = new Set();
+      this.progressListeners.set(meetingId, set);
+    }
+    set.add(listener);
+
+    return () => {
+      set?.delete(listener);
+      if (set?.size === 0) {
+        this.progressListeners.delete(meetingId);
+      }
+    };
   }
 
   setSummaryService(service: SummaryService): void {
@@ -167,6 +222,11 @@ export class TranscriptionService {
     }
 
     const cancelTime = this.now();
+    this.emitProgress(meetingId, {
+      stage: "cancelled",
+      percent: 0,
+      message: "Transcription was cancelled."
+    });
     await this.db
       .updateTable("stage_runs")
       .set({
@@ -229,12 +289,27 @@ export class TranscriptionService {
     };
     this.activeJobs.set(meetingId, activeJob);
 
+    const onProgressHandler = (update: TranscriptionProgressUpdate) => {
+      this.emitProgress(meetingId, update);
+      if (options.onProgress) {
+        void options.onProgress(update);
+      }
+    };
+
     try {
       if (provider === "local") {
-        return await this.transcribeMeetingLocal(meetingId, { ...options, signal: abortController.signal });
+        return await this.transcribeMeetingLocal(meetingId, {
+          ...options,
+          signal: abortController.signal,
+          onProgress: onProgressHandler
+        });
       }
 
-      return await this.transcribeMeetingSpeechmatics(meetingId, { ...options, signal: abortController.signal });
+      return await this.transcribeMeetingSpeechmatics(meetingId, {
+        ...options,
+        signal: abortController.signal,
+        onProgress: onProgressHandler
+      });
     } finally {
       this.activeJobs.delete(meetingId);
     }
@@ -441,6 +516,12 @@ export class TranscriptionService {
       // Trigger auto-summarization hook
       void this.autoSummarize(meeting.id);
 
+      this.emitProgress(meeting.id, {
+        stage: "done",
+        percent: 100,
+        message: "Transcription completed successfully."
+      });
+
       return {
         stageRunId,
         jobId: `local-${stageRunId.slice(0, 8)}`,
@@ -452,6 +533,13 @@ export class TranscriptionService {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const isCancelled = Boolean(options.signal?.aborted || errorMsg.toLowerCase().includes("cancel"));
       const errTime = this.now();
+
+      this.emitProgress(meetingId, {
+        stage: isCancelled ? "cancelled" : "error",
+        percent: 0,
+        message: isCancelled ? "Transcription was cancelled." : errorMsg,
+        error: isCancelled ? undefined : errorMsg
+      });
 
       if (isCancelled) {
         this.logger.info("Local transcription cancelled by user", { meetingId });

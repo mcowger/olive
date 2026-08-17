@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { cpus } from "node:os";
 import type { TranscriptWord } from "@olive/shared";
 import { logger } from "../../logger.ts";
 import { encodeWav } from "./wav.ts";
@@ -32,7 +33,9 @@ export class LlamaServerManager {
     this.host = options.host ?? "127.0.0.1";
     this.modelRepo = options.modelRepo ?? process.env.LLAMA_MODEL_REPO ?? "ggml-org/Qwen3-ASR-1.7B-GGUF";
     this.gpuLayers = options.gpuLayers ?? (existsSync("/dev/dri") ? 99 : 0);
-    this.threads = options.threads ?? 8;
+    const numCores = cpus()?.length ?? 4;
+    const defaultThreads = Math.max(1, Math.min(8, numCores > 2 ? numCores - 2 : numCores));
+    this.threads = options.threads ?? (process.env.LLAMA_THREADS ? Number(process.env.LLAMA_THREADS) : defaultThreads);
     this.contextSize = options.contextSize ?? 4096;
 
     // Register cleanup on process exit

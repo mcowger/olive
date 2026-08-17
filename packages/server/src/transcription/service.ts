@@ -14,7 +14,10 @@ import {
 import { parseSpeechmaticsJsonV2, transcriptToText } from "../providers/speechmatics/normalize.ts";
 import {
   LocalTranscriptionPipeline,
-  type DiscoveredSpeakerVoiceprint
+  LocalTranscriptionWorkerRunner,
+  type DiscoveredSpeakerVoiceprint,
+  type LocalTranscriptionResult,
+  type TranscribeAudioOptions
 } from "../providers/local/index.ts";
 
 import type { SummaryService } from "../summaries/service.ts";
@@ -26,11 +29,15 @@ export const PROVIDER_LOCAL = "local";
 
 export type TranscriptionProviderName = "speechmatics" | "local";
 
+export interface LocalTranscriptionRunner {
+  transcribe(options: TranscribeAudioOptions): Promise<LocalTranscriptionResult>;
+}
+
 export interface TranscriptionServiceOptions {
   db: Kysely<Database>;
   meetingsDir: string;
   speechmaticsClient?: SpeechmaticsClient;
-  localPipeline?: LocalTranscriptionPipeline;
+  localPipeline?: LocalTranscriptionRunner;
   defaultProvider?: TranscriptionProviderName;
   logger?: Logger;
   webhookUrl?: string;
@@ -84,7 +91,7 @@ export class TranscriptionService {
   private readonly db: Kysely<Database>;
   private readonly meetingsDir: string;
   private readonly client: SpeechmaticsClient;
-  private readonly localPipeline: LocalTranscriptionPipeline;
+  private readonly localPipeline: LocalTranscriptionRunner;
   private readonly defaultProvider: TranscriptionProviderName;
   private readonly logger: Logger;
   private readonly webhookUrl?: string;
@@ -99,7 +106,7 @@ export class TranscriptionService {
     this.db = options.db;
     this.meetingsDir = options.meetingsDir;
     this.client = options.speechmaticsClient ?? new SpeechmaticsClient();
-    this.localPipeline = options.localPipeline ?? new LocalTranscriptionPipeline();
+    this.localPipeline = options.localPipeline ?? new LocalTranscriptionWorkerRunner();
     this.defaultProvider =
       options.defaultProvider ??
       (options.speechmaticsClient || process.env.SPEECHMATICS_API_KEY ? "speechmatics" : "local");
@@ -200,7 +207,7 @@ export class TranscriptionService {
     return this.client;
   }
 
-  get local(): LocalTranscriptionPipeline {
+  get local(): LocalTranscriptionRunner {
     return this.localPipeline;
   }
 

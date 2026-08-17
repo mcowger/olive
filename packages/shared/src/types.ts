@@ -240,7 +240,7 @@ export interface Transcript {
   }>;
 }
 
-export type TranscriptionProgressStage = "decoding" | "diarizing" | "transcribing" | "finalizing" | "done" | "error" | "cancelled";
+export type TranscriptionProgressStage = "queued" | "decoding" | "diarizing" | "transcribing" | "finalizing" | "done" | "error" | "cancelled";
 
 export interface TranscriptionProgressUpdate {
   stage: TranscriptionProgressStage;

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
@@ -180,7 +180,44 @@ export const SPEECH_ENHANCEMENT_FILTER =
   "highpass=f=80,afftdn=nr=10:nf=-35:tn=1,equalizer=f=350:t=q:w=1.5:g=-3,equalizer=f=3200:t=q:w=1.2:g=5,speechnorm=e=4:r=0.0001:l=1";
 
 /**
- * Enhances a recorded audio file for vocal clarity and loudness normalization using FFmpeg.
+ * Enhances a recorded audio file for vocal clarity and loudness normalization using FFmpeg (async non-blocking).
+ */
+export async function enhanceAudioFileAsync(sourcePath: string, targetPath: string): Promise<boolean> {
+  if (!existsSync(sourcePath)) return false;
+  return new Promise<boolean>((resolve) => {
+    try {
+      const ff = spawn(
+        "ffmpeg",
+        [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-i",
+          sourcePath,
+          "-af",
+          SPEECH_ENHANCEMENT_FILTER,
+          "-c:a",
+          "libmp3lame",
+          "-b:a",
+          "128k",
+          targetPath
+        ],
+        { stdio: ["ignore", "ignore", "pipe"] }
+      );
+
+      ff.on("error", () => resolve(false));
+      ff.on("close", (code) => {
+        resolve(code === 0 && existsSync(targetPath));
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Synchronous backward-compatibility wrapper for audio enhancement.
  */
 export function enhanceAudioFile(sourcePath: string, targetPath: string): boolean {
   if (!existsSync(sourcePath)) return false;
@@ -214,7 +251,7 @@ export function enhanceAudioFile(sourcePath: string, targetPath: string): boolea
 
 /**
  * Universally loads and decodes any audio file (WAV, MP3, M4A, AAC, FLAC, OGG, WebM)
- * to 16kHz mono Float32Array samples using ffmpeg if non-WAV.
+ * to 16kHz mono Float32Array samples using ffmpeg asynchronously without blocking the event loop.
  */
 export async function loadAudioSamples(
   input: { audioPath?: string; audioBytes?: Uint8Array; enhance?: boolean },
@@ -275,21 +312,54 @@ export async function loadAudioSamples(
 
   args.push("-f", "wav", "-acodec", "pcm_s16le", "-ac", "1", "-ar", String(targetSampleRate), "pipe:1");
 
-  try {
-    const ff = spawnSync("ffmpeg", args, {
-      input: stdinData,
-      maxBuffer: 500 * 1024 * 1024
-    });
+  return new Promise<DecodedWav>((resolve, reject) => {
+    try {
+      const ff = spawn("ffmpeg", args, {
+        stdio: ["pipe", "pipe", "pipe"]
+      });
 
-    if (ff.status === 0 && ff.stdout && ff.stdout.length >= 44) {
-      return decodeWav(new Uint8Array(ff.stdout));
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+
+      ff.stdout.on("data", (chunk: Buffer) => {
+        stdoutChunks.push(chunk);
+      });
+
+      ff.stderr.on("data", (chunk: Buffer) => {
+        stderrChunks.push(chunk);
+      });
+
+      ff.on("error", (err: Error) => {
+        reject(new Error(`Failed to spawn ffmpeg: ${err.message}`));
+      });
+
+      ff.on("close", (code: number | null) => {
+        if (code === 0) {
+          const totalBuffer = Buffer.concat(stdoutChunks);
+          if (totalBuffer.byteLength >= 44) {
+            try {
+              const decoded = decodeWav(new Uint8Array(totalBuffer.buffer, totalBuffer.byteOffset, totalBuffer.byteLength));
+              resolve(decoded);
+              return;
+            } catch (err) {
+              reject(err);
+              return;
+            }
+          }
+        }
+        const errMsg = Buffer.concat(stderrChunks).toString("utf8").trim() || `exit code ${code}`;
+        reject(new Error(`ffmpeg audio conversion failed (${errMsg})`));
+      });
+
+      if (stdinData && ff.stdin) {
+        ff.stdin.end(stdinData);
+      } else {
+        ff.stdin.end();
+      }
+    } catch (err) {
+      reject(new Error(`Failed to decode audio: ${err instanceof Error ? err.message : String(err)}`));
     }
-
-    const errMsg = ff.stderr ? ff.stderr.toString().trim() : `exit code ${ff.status}`;
-    throw new Error(`ffmpeg audio conversion failed (${errMsg})`);
-  } catch (err) {
-    throw new Error(`Failed to decode audio: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  });
 }
 
 /**

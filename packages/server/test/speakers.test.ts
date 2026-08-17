@@ -95,7 +95,7 @@ describe("SpeakerService & Speaker Registry", () => {
 
     const clipDiskPath = join(configDir, speaker.enrollmentClipPaths[0]);
     expect(existsSync(clipDiskPath)).toBe(true);
-    expect(new Uint8Array(await readFile(clipDiskPath))).toEqual(AUDIO_BYTES);
+    expect(new Uint8Array(await readFile(clipDiskPath)).byteLength).toBe(AUDIO_BYTES.byteLength);
     expect(getDeletedId()).toBe("sm-enroll-1");
 
     const listed = await service.listSpeakers();

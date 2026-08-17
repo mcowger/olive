@@ -707,12 +707,12 @@ export class SpeakerService {
       }
 
       const convertedSegments: TranscriptSegment[] = parsedData
-        .filter((item: any) => item.content && item.content.trim())
+        .filter((item: any) => (item.text && item.text.trim()) || (item.content && item.content.trim()))
         .map((item: any) => ({
           speaker: item.speaker || "Speaker",
-          text: item.content,
-          startMs: item.start_time ?? 0,
-          endMs: item.end_time ?? 0
+          text: item.text || item.content || "",
+          startMs: item.startMs ?? item.start_time ?? 0,
+          endMs: item.endMs ?? item.end_time ?? 0
         }));
 
       const coalescedSegments = coalesceSpeakerSegments(convertedSegments, 15000);
@@ -2068,12 +2068,12 @@ export class SpeakerService {
           segments = parsed.segments;
         } else if (Array.isArray(parsed)) {
           segments = parsed
-            .filter((item: any) => item.content && item.content.trim())
+            .filter((item: any) => (item.text && item.text.trim()) || (item.content && item.content.trim()))
             .map((item: any) => ({
               speaker: item.speaker || "Speaker",
-              text: item.content,
-              startMs: item.start_time ?? 0,
-              endMs: item.end_time ?? 0
+              text: item.text || item.content || "",
+              startMs: item.startMs ?? item.start_time ?? 0,
+              endMs: item.endMs ?? item.end_time ?? 0
             }));
         }
 

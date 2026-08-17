@@ -1107,12 +1107,12 @@ function MeetingDetailView({
         }));
       } else if (Array.isArray(parsed)) {
         parsedTranscriptSegments = parsed
-          .filter((item: any) => item.content && item.content.trim())
+          .filter((item: any) => (item.text && item.text.trim()) || (item.content && item.content.trim()))
           .map((item: any, idx: number) => ({
             speaker: item.speaker || "Speaker",
-            text: item.content,
-            startMs: item.start_time ?? 0,
-            endMs: item.end_time ?? 0,
+            text: item.text || item.content || "",
+            startMs: item.startMs ?? item.start_time ?? 0,
+            endMs: item.endMs ?? item.end_time ?? 0,
             verified: Boolean(item.verified),
             segmentIndex: idx
           }));
@@ -1753,14 +1753,19 @@ function MeetingDetailView({
                 if (optimistic && detail?.transcriptContent) {
                   try {
                     const parsed = JSON.parse(detail.transcriptContent);
-                    if (Array.isArray(parsed.segments)) {
+                    const targetArray = Array.isArray(parsed.segments)
+                      ? parsed.segments
+                      : Array.isArray(parsed)
+                      ? parsed
+                      : null;
+                    if (targetArray) {
                       if (optimistic.scope === "single" && optimistic.segmentIndex !== undefined) {
-                        if (parsed.segments[optimistic.segmentIndex]) {
-                          parsed.segments[optimistic.segmentIndex].speaker = optimistic.targetName;
-                          parsed.segments[optimistic.segmentIndex].verified = true;
+                        if (targetArray[optimistic.segmentIndex]) {
+                          targetArray[optimistic.segmentIndex].speaker = optimistic.targetName;
+                          targetArray[optimistic.segmentIndex].verified = true;
                         }
                       } else {
-                        for (const s of parsed.segments) {
+                        for (const s of targetArray) {
                           if ((s.speaker || "").trim().toLowerCase() === prevLabel.trim().toLowerCase()) {
                             s.speaker = optimistic.targetName;
                             s.verified = true;

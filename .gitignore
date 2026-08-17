@@ -9,3 +9,4 @@ packages/web/src/styles.generated.css
 settings.json
 transcribe-api-test-*
 packages/server/test/transcribe-api-test-*
+packages/server/test/local-api-mtg-*

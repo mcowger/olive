@@ -2165,10 +2165,9 @@ function ReassignSpeakerModal({
             </button>
             <button
               type="submit"
-              disabled={submitting}
-              className="rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 hover:bg-lime-300 disabled:opacity-50"
+              className="rounded-lg bg-lime-400 px-4 py-2 text-sm font-semibold text-stone-950 hover:bg-lime-300 transition shadow-md"
             >
-              {submitting ? "Saving…" : "Apply & Save"}
+              Apply & Save
             </button>
           </div>
         </form>

@@ -10,6 +10,7 @@
   "scripts": {
     "build": "bun run build:web",
     "build:web": "bun run packages/web/build.ts",
+    "deploy:staging": "bun run scripts/deploy-staging.ts",
     "dev": "bun run dev.ts",
     "dev:server": "bun --watch packages/server/src/index.ts",
     "dev:web": "bun run packages/web/dev.ts",

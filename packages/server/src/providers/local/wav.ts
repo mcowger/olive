@@ -176,16 +176,52 @@ export function resample(
   return result;
 }
 
+export const SPEECH_ENHANCEMENT_FILTER =
+  "highpass=f=80,afftdn=nr=10:nf=-35:tn=1,equalizer=f=350:t=q:w=1.5:g=-3,equalizer=f=3200:t=q:w=1.2:g=5,speechnorm=e=4:r=0.0001:l=1";
+
+/**
+ * Enhances a recorded audio file for vocal clarity and loudness normalization using FFmpeg.
+ */
+export function enhanceAudioFile(sourcePath: string, targetPath: string): boolean {
+  if (!existsSync(sourcePath)) return false;
+  try {
+    const ff = spawnSync(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        sourcePath,
+        "-af",
+        SPEECH_ENHANCEMENT_FILTER,
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "128k",
+        targetPath
+      ],
+      {
+        maxBuffer: 500 * 1024 * 1024
+      }
+    );
+    return ff.status === 0 && existsSync(targetPath);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Universally loads and decodes any audio file (WAV, MP3, M4A, AAC, FLAC, OGG, WebM)
  * to 16kHz mono Float32Array samples using ffmpeg if non-WAV.
  */
 export async function loadAudioSamples(
-  input: { audioPath?: string; audioBytes?: Uint8Array },
+  input: { audioPath?: string; audioBytes?: Uint8Array; enhance?: boolean },
   targetSampleRate = 16000
 ): Promise<DecodedWav> {
   // If raw bytes are provided and valid WAV
-  if (input.audioBytes && isWav(input.audioBytes)) {
+  if (input.audioBytes && isWav(input.audioBytes) && input.enhance !== true) {
     let decoded = decodeWav(input.audioBytes);
     if (decoded.sampleRate !== targetSampleRate) {
       decoded = {
@@ -198,7 +234,7 @@ export async function loadAudioSamples(
   }
 
   // If audioPath is provided and is a valid WAV
-  if (input.audioPath && existsSync(input.audioPath)) {
+  if (input.audioPath && existsSync(input.audioPath) && input.enhance !== true) {
     try {
       const bytes = new Uint8Array(await readFile(input.audioPath));
       if (isWav(bytes)) {
@@ -215,7 +251,7 @@ export async function loadAudioSamples(
     } catch {}
   }
 
-  // Convert non-WAV audio (mp3, m4a, etc.) to 16kHz mono 16-bit PCM WAV via ffmpeg
+  // Convert audio (mp3, m4a, wav, etc.) to 16kHz mono 16-bit PCM WAV via ffmpeg with speech enhancement
   const args = [
     "-hide_banner",
     "-loglevel",
@@ -231,6 +267,10 @@ export async function loadAudioSamples(
     stdinData = input.audioBytes;
   } else {
     throw new Error("Either audioPath or audioBytes must be provided");
+  }
+
+  if (input.enhance !== false) {
+    args.push("-af", SPEECH_ENHANCEMENT_FILTER);
   }
 
   args.push("-f", "wav", "-acodec", "pcm_s16le", "-ac", "1", "-ar", String(targetSampleRate), "pipe:1");

@@ -742,6 +742,7 @@ function MeetingDetailView({
   const [showDiarizationSettings, setShowDiarizationSettings] = useState(false);
   const [customClusteringThreshold, setCustomClusteringThreshold] = useState(0.85);
   const [customSimilarityThreshold, setCustomSimilarityThreshold] = useState(0.85);
+  const [enhancedAudio, setEnhancedAudio] = useState(true);
   const [reassigningSpeaker, setReassigningSpeaker] = useState<string | null>(null);
   const [showSummaryModal, setShowSummaryModal] = useState(false);
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
@@ -1016,15 +1017,41 @@ function MeetingDetailView({
 
           {/* Audio Player if recording exists */}
           {detail.recordings.length > 0 && (
-            <section className="rounded-xl border border-stone-800 bg-stone-900/80 p-4 space-y-2">
-              <div className="flex items-center justify-between text-xs text-stone-400">
-                <span className="font-semibold uppercase tracking-wider text-stone-300">Recording Audio</span>
-                <span>{detail.recordings[0].mime} • {(detail.recordings[0].sizeBytes / 1024 / 1024).toFixed(2)} MB</span>
+            <section className="rounded-xl border border-stone-800 bg-stone-900/80 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-400">
+                <div className="flex items-center gap-3">
+                  <span className="font-semibold uppercase tracking-wider text-stone-300">Recording Audio</span>
+                  <span>{detail.recordings[0].mime} • {(detail.recordings[0].sizeBytes / 1024 / 1024).toFixed(2)} MB</span>
+                </div>
+
+                {/* Voice Clarity Enhancement Toggle */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const currentTime = audioRef.current?.currentTime || 0;
+                    const wasPlaying = !audioRef.current?.paused;
+                    setEnhancedAudio(!enhancedAudio);
+                    setTimeout(() => {
+                      if (audioRef.current) {
+                        audioRef.current.currentTime = currentTime;
+                        if (wasPlaying) void audioRef.current.play();
+                      }
+                    }, 50);
+                  }}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                    enhancedAudio
+                      ? "border-lime-400/40 bg-lime-400/10 text-lime-300 hover:bg-lime-400/20"
+                      : "border-stone-700 bg-stone-800 text-stone-400 hover:text-stone-200"
+                  }`}
+                  title="Toggle FFmpeg speech clarity equalizer & adaptive de-noiser"
+                >
+                  <span>{enhancedAudio ? "✨ Voice Enhanced (Active)" : "🔉 Original Raw Audio"}</span>
+                </button>
               </div>
               <audio
                 ref={audioRef}
                 controls
-                src={`/api/meetings/${meetingId}/audio`}
+                src={`/api/meetings/${meetingId}/audio?enhanced=${enhancedAudio}`}
                 className="w-full h-10 rounded"
               />
             </section>

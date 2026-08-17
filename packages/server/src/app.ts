@@ -19,6 +19,7 @@ import { LlmService } from "./llm/service.ts";
 import { SummaryService } from "./summaries/service.ts";
 import { BackupService } from "./backup/service.ts";
 import { meetingPaths } from "./layout.ts";
+import { enhanceAudioFile } from "./providers/local/wav.ts";
 
 export interface AppOptions {
   db?: Kysely<Database>;
@@ -281,9 +282,26 @@ export function createApp(options: AppOptions = {}): Hono {
       return c.json({ error: "Audio file not found on disk" }, 404);
     }
 
-    const file = Bun.file(fullPath);
+    let targetPath = fullPath;
+    let targetMime = recording.mime || "audio/mp4";
+
+    if (c.req.query("enhanced") === "true") {
+      const enhancedRelativePath = join("audio", `${recording.id}.enhanced.mp3`);
+      const enhancedFullPath = join(folder, enhancedRelativePath);
+
+      if (!existsSync(enhancedFullPath)) {
+        enhanceAudioFile(fullPath, enhancedFullPath);
+      }
+
+      if (existsSync(enhancedFullPath)) {
+        targetPath = enhancedFullPath;
+        targetMime = "audio/mpeg";
+      }
+    }
+
+    const file = Bun.file(targetPath);
     const size = file.size;
-    const mime = recording.mime || "audio/mp4";
+    const mime = targetMime;
 
     const rangeHeader = c.req.header("range");
     if (rangeHeader && rangeHeader.startsWith("bytes=")) {

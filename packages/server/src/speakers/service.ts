@@ -155,6 +155,47 @@ function parseJsonField<T>(value: string | null | undefined, fallback: T): T {
   }
 }
 
+function extractTranscriptSegments(parsedData: any): {
+  segments: TranscriptSegment[];
+  isArrayFormat: boolean;
+  language?: string;
+  durationMs?: number;
+  speakers?: any[];
+} {
+  if (Array.isArray(parsedData?.segments)) {
+    return {
+      segments: parsedData.segments,
+      isArrayFormat: false,
+      language: parsedData.language,
+      durationMs: parsedData.durationMs,
+      speakers: parsedData.speakers
+    };
+  }
+
+  if (Array.isArray(parsedData)) {
+    const segments: TranscriptSegment[] = parsedData
+      .filter((item: any) => (item.text && item.text.trim()) || (item.content && item.content.trim()))
+      .map((item: any) => ({
+        speaker: item.speaker || "Speaker",
+        text: item.text || item.content || "",
+        startMs: item.startMs ?? item.start_time ?? 0,
+        endMs: item.endMs ?? item.end_time ?? 0,
+        verified: Boolean(item.verified),
+        words: item.words
+      }));
+
+    return {
+      segments,
+      isArrayFormat: true
+    };
+  }
+
+  return {
+    segments: [],
+    isArrayFormat: false
+  };
+}
+
 function toSpeaker(row: SpeakerRow): Speaker {
   return {
     id: row.id,
@@ -696,220 +737,187 @@ export class SpeakerService {
     let extractedVoiceprintsCount = 0;
     const normalizedFrom = fromLabel.trim().toLowerCase();
 
-    let updatedTranscript: Transcript;
+    const { segments, isArrayFormat, language, durationMs, speakers } = extractTranscriptSegments(parsedData);
 
-    if (Array.isArray(parsedData)) {
-      for (const item of parsedData) {
-        if (item.speaker && item.speaker.trim().toLowerCase() === normalizedFrom) {
-          item.speaker = targetSpeakerRow.name;
-          updatedSegmentsCount++;
-        }
-      }
+    // 3. Adopt voiceprints if requested
+    if (adoptVoiceprint) {
+      const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
+      const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
+      let adoptedAny = false;
 
-      const convertedSegments: TranscriptSegment[] = parsedData
-        .filter((item: any) => (item.text && item.text.trim()) || (item.content && item.content.trim()))
-        .map((item: any) => ({
-          speaker: item.speaker || "Speaker",
-          text: item.text || item.content || "",
-          startMs: item.startMs ?? item.start_time ?? 0,
-          endMs: item.endMs ?? item.end_time ?? 0
-        }));
-
-      const coalescedSegments = coalesceSpeakerSegments(convertedSegments, 15000);
-
-      const tmpJson = `${jsonPath}.tmp`;
-      await writeFile(tmpJson, `${JSON.stringify(parsedData, null, 2)}\n`, "utf8");
-      await rename(tmpJson, jsonPath);
-
-      const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
-      const tmpTxt = `${txtPath}.tmp`;
-      await writeFile(tmpTxt, `${transcriptToText({ segments: coalescedSegments })}\n`, "utf8");
-      await rename(tmpTxt, txtPath);
-
-      updatedTranscript = {
-        segments: coalescedSegments
-      };
-    } else {
-      const segments: any[] = parsedData.segments ?? [];
-
-      // 3. Adopt voiceprints if requested
-      if (adoptVoiceprint) {
-        const providerIds = parseJsonField<Record<string, string[]>>(targetSpeakerRow.provider_ids, {});
-        const clips = parseJsonField<string[]>(targetSpeakerRow.enrollment_clip_paths, []);
-        let adoptedAny = false;
-
-        // A. Adopt Speechmatics voiceprint identifiers
-        const extractedIds: string[] = [];
-        const speakerList = (parsedData.speakers ?? []) as any[];
-        for (const s of speakerList) {
-          const label = (s.label || s.speaker || "").trim().toLowerCase();
-          if (label === normalizedFrom && s.speaker_identifiers) {
-            const ids = Array.isArray(s.speaker_identifiers)
-              ? s.speaker_identifiers
-              : Array.from(s.speaker_identifiers);
-            for (const id of ids as string[]) {
-              if (id && !extractedIds.includes(id)) {
-                extractedIds.push(id);
-              }
+      // A. Adopt Speechmatics voiceprint identifiers
+      const extractedIds: string[] = [];
+      const speakerList = ((parsedData.speakers ?? speakers) ?? []) as any[];
+      for (const s of speakerList) {
+        const label = (s.label || s.speaker || "").trim().toLowerCase();
+        if (label === normalizedFrom && s.speaker_identifiers) {
+          const ids = Array.isArray(s.speaker_identifiers)
+            ? s.speaker_identifiers
+            : Array.from(s.speaker_identifiers);
+          for (const id of ids as string[]) {
+            if (id && !extractedIds.includes(id)) {
+              extractedIds.push(id);
             }
           }
         }
+      }
 
-        if (extractedIds.length > 0) {
-          extractedVoiceprintsCount += extractedIds.length;
-          const currentSmIds = new Set(providerIds.speechmatics ?? []);
-          for (const id of extractedIds) {
-            currentSmIds.add(id);
-          }
-          providerIds.speechmatics = Array.from(currentSmIds);
-          adoptedAny = true;
+      if (extractedIds.length > 0) {
+        extractedVoiceprintsCount += extractedIds.length;
+        const currentSmIds = new Set(providerIds.speechmatics ?? []);
+        for (const id of extractedIds) {
+          currentSmIds.add(id);
         }
+        providerIds.speechmatics = Array.from(currentSmIds);
+        adoptedAny = true;
+      }
 
-        // B. Extract speaker's audio from recording on disk
-        const recording = await this.db
-          .selectFrom("recordings")
+      // B. Extract speaker's audio from recording on disk
+      const recording = await this.db
+        .selectFrom("recordings")
+        .selectAll()
+        .where("meeting_id", "=", meetingId)
+        .orderBy("created_at", "asc")
+        .executeTakeFirst();
+
+      if (recording) {
+        const audioFullPath = join(folder, recording.path);
+        if (existsSync(audioFullPath)) {
+          try {
+            const audioBytes = new Uint8Array(await readFile(audioFullPath));
+            if (audioBytes.byteLength >= 12) {
+              const decoded = await loadAudioSamples({ audioPath: audioFullPath, audioBytes, enhance: false }, 16000);
+              const fullSamples = decoded.samples;
+
+              const isSingleSegment = options.segmentIndex !== undefined && options.scope === "single";
+              const matchingSegments = isSingleSegment
+                ? (segments[options.segmentIndex!] ? [segments[options.segmentIndex!]] : [])
+                : segments.filter(
+                    (s) => (s.speaker || "").trim().toLowerCase() === normalizedFrom
+                  );
+
+              const speakerSampleChunks: Float32Array[] = [];
+              for (const seg of matchingSegments) {
+                const sStart = Math.floor((seg.startMs / 1000) * 16000);
+                const sEnd = Math.min(fullSamples.length, Math.floor((seg.endMs / 1000) * 16000));
+                if (sEnd > sStart) {
+                  speakerSampleChunks.push(fullSamples.subarray(sStart, sEnd));
+                }
+              }
+
+              if (speakerSampleChunks.length > 0) {
+                const totalLength = speakerSampleChunks.reduce((acc, c) => acc + c.length, 0);
+                const mergedSamples = new Float32Array(totalLength);
+                let offset = 0;
+                for (const c of speakerSampleChunks) {
+                  mergedSamples.set(c, offset);
+                  offset += c.length;
+                }
+
+                const durationSec = mergedSamples.length / 16000;
+
+                // Validate: only enroll if duration is between 3.0s and 30.0s
+                if (durationSec >= 3.0 && durationSec <= 30.0) {
+                  const newLocalEmbedding = await this.localEmbeddingExtractor.extract(mergedSamples, 16000);
+                  const localVectors = providerIds.local ?? [];
+                  localVectors.push(JSON.stringify(newLocalEmbedding));
+                  providerIds.local = localVectors;
+                  extractedVoiceprintsCount++;
+                  adoptedAny = true;
+
+                  // Save audio clip
+                  const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
+                  await mkdir(speakerFolder, { recursive: true });
+                  const clipFilename = `clip_meeting_${meetingId}_${currentTime}.wav`;
+                  const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
+                  const clipWavBytes = encodeWav(mergedSamples, 16000);
+                  await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
+
+                  if (!clips.includes(clipRelativePath)) {
+                    clips.push(clipRelativePath);
+                  }
+
+                  if (this.client?.isConfigured && (!providerIds.speechmatics || providerIds.speechmatics.length === 0)) {
+                    void this.enrollSpeechmaticsClipBackground(targetSpeakerRow.id, clipWavBytes, clipFilename);
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            this.logger.warn("Could not extract audio clip during speaker reassignment", {
+              meetingId,
+              error: err instanceof Error ? err.message : String(err)
+            });
+          }
+        }
+      }
+
+      if (adoptedAny) {
+        await this.db
+          .updateTable("speakers")
+          .set({
+            provider_ids: JSON.stringify(providerIds),
+            enrollment_clip_paths: JSON.stringify(clips),
+            enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
+          })
+          .where("id", "=", targetSpeakerRow.id)
+          .execute();
+
+        targetSpeakerRow = await this.db
+          .selectFrom("speakers")
           .selectAll()
-          .where("meeting_id", "=", meetingId)
-          .orderBy("created_at", "asc")
-          .executeTakeFirst();
+          .where("id", "=", targetSpeakerRow.id)
+          .executeTakeFirstOrThrow();
+      }
+    }
 
-        if (recording) {
-          const audioFullPath = join(folder, recording.path);
-          if (existsSync(audioFullPath)) {
-            try {
-              const audioBytes = new Uint8Array(await readFile(audioFullPath));
-              if (audioBytes.byteLength >= 12) {
-                const decoded = await loadAudioSamples({ audioPath: audioFullPath, audioBytes, enhance: false }, 16000);
-                const fullSamples = decoded.samples;
-
-                const isSingleSegment = options.segmentIndex !== undefined && options.scope === "single";
-                const matchingSegments = isSingleSegment
-                  ? (segments[options.segmentIndex!] ? [segments[options.segmentIndex!]] : [])
-                  : segments.filter(
-                      (s) => (s.speaker || "").trim().toLowerCase() === normalizedFrom
-                    );
-
-                const speakerSampleChunks: Float32Array[] = [];
-                for (const seg of matchingSegments) {
-                  const sStart = Math.floor((seg.startMs / 1000) * 16000);
-                  const sEnd = Math.min(fullSamples.length, Math.floor((seg.endMs / 1000) * 16000));
-                  if (sEnd > sStart) {
-                    speakerSampleChunks.push(fullSamples.subarray(sStart, sEnd));
-                  }
-                }
-
-                if (speakerSampleChunks.length > 0) {
-                  const totalLength = speakerSampleChunks.reduce((acc, c) => acc + c.length, 0);
-                  const mergedSamples = new Float32Array(totalLength);
-                  let offset = 0;
-                  for (const c of speakerSampleChunks) {
-                    mergedSamples.set(c, offset);
-                    offset += c.length;
-                  }
-
-                  const durationSec = mergedSamples.length / 16000;
-
-                  // Validate: only enroll if duration is between 3.0s and 30.0s
-                  if (durationSec >= 3.0 && durationSec <= 30.0) {
-                    const newLocalEmbedding = await this.localEmbeddingExtractor.extract(mergedSamples, 16000);
-                    const localVectors = providerIds.local ?? [];
-                    localVectors.push(JSON.stringify(newLocalEmbedding));
-                    providerIds.local = localVectors;
-                    extractedVoiceprintsCount++;
-                    adoptedAny = true;
-
-                    // Save audio clip
-                    const speakerFolder = join(this.configDir, "speakers", targetSpeakerRow.id);
-                    await mkdir(speakerFolder, { recursive: true });
-                    const clipFilename = `clip_meeting_${meetingId}_${currentTime}.wav`;
-                    const clipRelativePath = join("speakers", targetSpeakerRow.id, clipFilename);
-                    const clipWavBytes = encodeWav(mergedSamples, 16000);
-                    await writeFile(join(this.configDir, clipRelativePath), clipWavBytes);
-
-                    if (!clips.includes(clipRelativePath)) {
-                      clips.push(clipRelativePath);
-                    }
-
-                    if (this.client?.isConfigured && (!providerIds.speechmatics || providerIds.speechmatics.length === 0)) {
-                      void this.enrollSpeechmaticsClipBackground(targetSpeakerRow.id, clipWavBytes, clipFilename);
-                    }
-                  }
-                }
-              }
-            } catch (err) {
-              this.logger.warn("Could not extract audio clip during speaker reassignment", {
-                meetingId,
-                error: err instanceof Error ? err.message : String(err)
-              });
-            }
+    // 4. Update speaker labels in segments
+    const isSingleSegment = options.segmentIndex !== undefined && options.scope === "single";
+    if (isSingleSegment) {
+      const targetSeg = segments[options.segmentIndex!];
+      if (targetSeg) {
+        targetSeg.speaker = targetSpeakerRow.name;
+        targetSeg.verified = true;
+        updatedSegmentsCount++;
+        if (targetSeg.words && Array.isArray(targetSeg.words)) {
+          for (const word of targetSeg.words) {
+            word.speaker = targetSpeakerRow.name;
           }
         }
-
-        if (adoptedAny) {
-          await this.db
-            .updateTable("speakers")
-            .set({
-              provider_ids: JSON.stringify(providerIds),
-              enrollment_clip_paths: JSON.stringify(clips),
-              enrolled_at: targetSpeakerRow.enrolled_at ?? currentTime
-            })
-            .where("id", "=", targetSpeakerRow.id)
-            .execute();
-
-          targetSpeakerRow = await this.db
-            .selectFrom("speakers")
-            .selectAll()
-            .where("id", "=", targetSpeakerRow.id)
-            .executeTakeFirstOrThrow();
-        }
       }
-
-      // 4. Update speaker labels in segments
-      const isSingleSegment = options.segmentIndex !== undefined && options.scope === "single";
-      if (isSingleSegment) {
-        const targetSeg = segments[options.segmentIndex!];
-        if (targetSeg) {
-          targetSeg.speaker = targetSpeakerRow.name;
-          targetSeg.verified = true;
+    } else {
+      for (const segment of segments) {
+        if (segment.speaker && segment.speaker.trim().toLowerCase() === normalizedFrom) {
+          segment.speaker = targetSpeakerRow.name;
+          segment.verified = true;
           updatedSegmentsCount++;
-          if (targetSeg.words && Array.isArray(targetSeg.words)) {
-            for (const word of targetSeg.words) {
+          if (segment.words && Array.isArray(segment.words)) {
+            for (const word of segment.words) {
               word.speaker = targetSpeakerRow.name;
             }
           }
         }
-      } else {
-        for (const segment of segments) {
-          if (segment.speaker && segment.speaker.trim().toLowerCase() === normalizedFrom) {
-            segment.speaker = targetSpeakerRow.name;
-            segment.verified = true;
-            updatedSegmentsCount++;
-            if (segment.words && Array.isArray(segment.words)) {
-              for (const word of segment.words) {
-                word.speaker = targetSpeakerRow.name;
-              }
-            }
-          }
-        }
       }
-
-      const coalescedSegments = coalesceSpeakerSegments(segments, 15000);
-
-      updatedTranscript = {
-        segments: coalescedSegments,
-        language: parsedData.language,
-        durationMs: parsedData.durationMs
-      };
-
-      const tmpJson = `${jsonPath}.tmp`;
-      await writeFile(tmpJson, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
-      await rename(tmpJson, jsonPath);
-
-      const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
-      const tmpTxt = `${txtPath}.tmp`;
-      await writeFile(tmpTxt, `${transcriptToText(updatedTranscript)}\n`, "utf8");
-      await rename(tmpTxt, txtPath);
     }
+
+    const coalescedSegments = coalesceSpeakerSegments(segments, 15000);
+
+    const updatedTranscript: Transcript = {
+      segments: coalescedSegments,
+      language: language ?? parsedData.language,
+      durationMs: durationMs ?? parsedData.durationMs,
+      speakers: speakers ?? parsedData.speakers
+    };
+
+    const dataToSave = isArrayFormat ? coalescedSegments : updatedTranscript;
+    const tmpJson = `${jsonPath}.tmp`;
+    await writeFile(tmpJson, `${JSON.stringify(dataToSave, null, 2)}\n`, "utf8");
+    await rename(tmpJson, jsonPath);
+
+    const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
+    const tmpTxt = `${txtPath}.tmp`;
+    await writeFile(tmpTxt, `${transcriptToText(updatedTranscript)}\n`, "utf8");
+    await rename(tmpTxt, txtPath);
 
     // 5. Link target speaker in meeting_speakers
     await this.db
@@ -1027,7 +1035,7 @@ export class SpeakerService {
     const rawContent = await readFile(jsonPath, "utf8");
     const parsedData = JSON.parse(rawContent);
 
-    const segments: TranscriptSegment[] = parsedData.segments ?? [];
+    const { segments, isArrayFormat, language, durationMs, speakers } = extractTranscriptSegments(parsedData);
     if (segmentIndex < 0 || segmentIndex >= segments.length) {
       throw new Error(`Invalid segment index ${segmentIndex} (total ${segments.length})`);
     }
@@ -1152,13 +1160,14 @@ export class SpeakerService {
 
     const updatedTranscript: Transcript = {
       segments,
-      language: parsedData.language,
-      durationMs: parsedData.durationMs,
-      speakers: parsedData.speakers
+      language: language ?? parsedData.language,
+      durationMs: durationMs ?? parsedData.durationMs,
+      speakers: speakers ?? parsedData.speakers
     };
 
+    const dataToSave = isArrayFormat ? segments : updatedTranscript;
     const tmpJson = `${jsonPath}.tmp`;
-    await writeFile(tmpJson, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
+    await writeFile(tmpJson, `${JSON.stringify(dataToSave, null, 2)}\n`, "utf8");
     await rename(tmpJson, jsonPath);
 
     const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
@@ -1235,7 +1244,7 @@ export class SpeakerService {
     const rawContent = await readFile(jsonPath, "utf8");
     const parsedData = JSON.parse(rawContent);
 
-    const segments: TranscriptSegment[] = parsedData.segments ?? [];
+    const { segments, isArrayFormat, language, durationMs, speakers } = extractTranscriptSegments(parsedData);
     if (segmentIndex < 0 || segmentIndex >= segments.length) {
       throw new Error(`Invalid segment index ${segmentIndex} (total ${segments.length})`);
     }
@@ -1251,13 +1260,14 @@ export class SpeakerService {
 
     const updatedTranscript: Transcript = {
       segments,
-      language: parsedData.language,
-      durationMs: parsedData.durationMs,
-      speakers: parsedData.speakers
+      language: language ?? parsedData.language,
+      durationMs: durationMs ?? parsedData.durationMs,
+      speakers: speakers ?? parsedData.speakers
     };
 
+    const dataToSave = isArrayFormat ? segments : updatedTranscript;
     const tmpJson = `${jsonPath}.tmp`;
-    await writeFile(tmpJson, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
+    await writeFile(tmpJson, `${JSON.stringify(dataToSave, null, 2)}\n`, "utf8");
     await rename(tmpJson, jsonPath);
 
     const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
@@ -1341,7 +1351,7 @@ export class SpeakerService {
     const rawContent = await readFile(jsonPath, "utf8");
     const parsedData = JSON.parse(rawContent);
 
-    const segments: TranscriptSegment[] = parsedData.segments ?? [];
+    const { segments, isArrayFormat, language, durationMs, speakers } = extractTranscriptSegments(parsedData);
     if (segmentIndex < 0 || segmentIndex >= segments.length) {
       throw new Error(`Invalid segment index ${segmentIndex} (total ${segments.length})`);
     }
@@ -1466,13 +1476,14 @@ export class SpeakerService {
 
     const updatedTranscript: Transcript = {
       segments,
-      language: parsedData.language,
-      durationMs: parsedData.durationMs,
-      speakers: parsedData.speakers
+      language: language ?? parsedData.language,
+      durationMs: durationMs ?? parsedData.durationMs,
+      speakers: speakers ?? parsedData.speakers
     };
 
+    const dataToSave = isArrayFormat ? segments : updatedTranscript;
     const tmpJson = `${jsonPath}.tmp`;
-    await writeFile(tmpJson, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
+    await writeFile(tmpJson, `${JSON.stringify(dataToSave, null, 2)}\n`, "utf8");
     await rename(tmpJson, jsonPath);
 
     const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));
@@ -1550,7 +1561,7 @@ export class SpeakerService {
     const rawContent = await readFile(jsonPath, "utf8");
     const parsedData = JSON.parse(rawContent);
 
-    const segments: TranscriptSegment[] = parsedData.segments ?? [];
+    const { segments, isArrayFormat, language, durationMs, speakers } = extractTranscriptSegments(parsedData);
     if (segmentIndex < 0 || segmentIndex >= segments.length - 1) {
       throw new Error(`Cannot merge segment ${segmentIndex} with next (total segments: ${segments.length})`);
     }
@@ -1578,13 +1589,14 @@ export class SpeakerService {
 
     const updatedTranscript: Transcript = {
       segments,
-      language: parsedData.language,
-      durationMs: parsedData.durationMs,
-      speakers: parsedData.speakers
+      language: language ?? parsedData.language,
+      durationMs: durationMs ?? parsedData.durationMs,
+      speakers: speakers ?? parsedData.speakers
     };
 
+    const dataToSave = isArrayFormat ? segments : updatedTranscript;
     const tmpJson = `${jsonPath}.tmp`;
-    await writeFile(tmpJson, `${JSON.stringify(updatedTranscript, null, 2)}\n`, "utf8");
+    await writeFile(tmpJson, `${JSON.stringify(dataToSave, null, 2)}\n`, "utf8");
     await rename(tmpJson, jsonPath);
 
     const txtPath = join(folder, transcriptArtifact.path.replace(/\.json$/, ".txt"));

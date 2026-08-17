@@ -1,5 +1,15 @@
+import { cpus } from "node:os";
 import type { VoiceprintVector } from "./types.ts";
 import { ensureSherpaModels, getSherpaOnnx } from "./sherpa-runtime.ts";
+
+function getDefaultEmbeddingThreads(): number {
+  if (process.env.OLIVE_EMBEDDING_THREADS) {
+    const parsed = Number(process.env.OLIVE_EMBEDDING_THREADS);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  const numCores = cpus()?.length ?? 4;
+  return Math.max(2, Math.min(8, Math.floor(numCores / 2)));
+}
 
 /**
  * Computes the Euclidean norm (L2 norm) of a vector.
@@ -183,11 +193,11 @@ export class SherpaSpeakerEmbeddingExtractor implements SpeakerEmbeddingExtracto
   constructor(options: { modelPath?: string; numThreads?: number } | number = {}) {
     if (typeof options === "number") {
       this.modelPath = null;
-      this.numThreads = 2;
+      this.numThreads = getDefaultEmbeddingThreads();
       this._dim = options;
     } else {
       this.modelPath = options.modelPath ?? null;
-      this.numThreads = options.numThreads ?? 2;
+      this.numThreads = options.numThreads ?? getDefaultEmbeddingThreads();
     }
   }
 

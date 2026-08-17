@@ -13,6 +13,7 @@ export interface LocalDiarizerConfig {
   minSpeechDurationMs?: number;
   minSilenceDurationMs?: number;
   clusteringThreshold?: number;
+  numThreads?: number;
 }
 
 export interface LocalAsrConfig {
@@ -24,6 +25,7 @@ export interface LocalAsrConfig {
 
 export interface LocalVoiceprintConfig {
   embeddingDim?: number;
+  numThreads?: number;
   similarityThreshold?: number; // Minimum cosine similarity to match (default 0.65)
   centroidUpdateRate?: number;   // alpha weight for exponential moving average centroid (default 0.85)
 }

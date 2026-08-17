@@ -1,6 +1,16 @@
+import { cpus } from "node:os";
 import type { LocalDiarizerConfig, LocalSpeakerSegment, VoiceprintVector } from "./types.ts";
 import { type SpeakerEmbeddingExtractorInterface, normalizeVector } from "./embedding.ts";
 import { ensureSherpaModels, getSherpaOnnx } from "./sherpa-runtime.ts";
+
+function getDefaultDiarizerThreads(): number {
+  if (process.env.OLIVE_DIARIZATION_THREADS) {
+    const parsed = Number(process.env.OLIVE_DIARIZATION_THREADS);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  const numCores = cpus()?.length ?? 4;
+  return Math.max(2, Math.min(8, Math.floor(numCores / 2)));
+}
 
 export interface DiarizerInterface {
   diarize(
@@ -35,7 +45,7 @@ export class SherpaSpeakerDiarizer implements DiarizerInterface {
     this.embeddingExtractor = embeddingExtractor;
     this.config = {
       clusteringThreshold: config.clusteringThreshold ?? 0.5,
-      numThreads: config.numThreads ?? 2,
+      numThreads: config.numThreads ?? getDefaultDiarizerThreads(),
       minDurationOn: config.minDurationOn ?? 0.3,
       minDurationOff: config.minDurationOff ?? 0.5,
       ...config

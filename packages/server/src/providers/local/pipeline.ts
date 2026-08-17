@@ -55,7 +55,9 @@ export class LocalTranscriptionPipeline {
   ) {
     this.embeddingExtractor =
       customExtractor ??
-      new SherpaSpeakerEmbeddingExtractor();
+      new SherpaSpeakerEmbeddingExtractor({
+        numThreads: options.diarizerConfig?.numThreads
+      });
 
     this.diarizer =
       customDiarizer ??

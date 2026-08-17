@@ -739,6 +739,9 @@ function MeetingDetailView({
   const [error, setError] = useState<string | null>(null);
   const [transcribing, setTranscribing] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<"local" | "speechmatics">("local");
+  const [showDiarizationSettings, setShowDiarizationSettings] = useState(false);
+  const [customClusteringThreshold, setCustomClusteringThreshold] = useState(0.85);
+  const [customSimilarityThreshold, setCustomSimilarityThreshold] = useState(0.85);
   const [reassigningSpeaker, setReassigningSpeaker] = useState<string | null>(null);
   const [showSummaryModal, setShowSummaryModal] = useState(false);
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
@@ -749,13 +752,21 @@ function MeetingDetailView({
   const fetchDetail = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/meetings/${meetingId}`);
+      const [res, cfgRes] = await Promise.all([
+        fetch(`/api/meetings/${meetingId}`),
+        fetch("/api/config")
+      ]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as MeetingDetailResponse;
       setDetail(data);
       if (data.summaries && data.summaries.length > 0) {
         const primary = data.summaries.find((s) => s.isPrimary);
         setSelectedSummaryId((prev) => prev || primary?.id || data.summaries[0].id);
+      }
+      if (cfgRes.ok) {
+        const cfg = await cfgRes.json();
+        if (cfg.localClusteringThreshold !== undefined) setCustomClusteringThreshold(cfg.localClusteringThreshold);
+        if (cfg.localSimilarityThreshold !== undefined) setCustomSimilarityThreshold(cfg.localSimilarityThreshold);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load meeting");
@@ -774,7 +785,13 @@ function MeetingDetailView({
       const res = await fetch(`/api/meetings/${meetingId}/transcribe`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider: selectedProvider, poll: true, force: true })
+        body: JSON.stringify({
+          provider: selectedProvider,
+          poll: true,
+          force: true,
+          clusteringThreshold: selectedProvider === "local" ? customClusteringThreshold : undefined,
+          similarityThreshold: selectedProvider === "local" ? customSimilarityThreshold : undefined
+        })
       });
       if (!res.ok) {
         const data = await res.json();
@@ -882,15 +899,33 @@ function MeetingDetailView({
                 <span className="capitalize">{detail.meeting.source}</span>
               </div>
             </div>
-            <div className="flex items-center gap-3">
-              <select
-                value={selectedProvider}
-                onChange={(e) => setSelectedProvider(e.target.value as "local" | "speechmatics")}
-                className="rounded-lg border border-stone-800 bg-stone-900 px-3 py-2 text-xs text-stone-200 focus:border-lime-400 focus:outline-none"
-              >
-                <option value="local">Local SOTA (Cohere 2B + Diarization)</option>
-                <option value="speechmatics">Speechmatics (Cloud)</option>
-              </select>
+            <div className="flex flex-col sm:flex-row items-end sm:items-center gap-3">
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedProvider}
+                  onChange={(e) => setSelectedProvider(e.target.value as "local" | "speechmatics")}
+                  className="rounded-lg border border-stone-800 bg-stone-900 px-3 py-2 text-xs text-stone-200 focus:border-lime-400 focus:outline-none"
+                >
+                  <option value="local">Local SOTA (Cohere 2B + Diarization)</option>
+                  <option value="speechmatics">Speechmatics (Cloud)</option>
+                </select>
+
+                {selectedProvider === "local" && (
+                  <button
+                    type="button"
+                    onClick={() => setShowDiarizationSettings(!showDiarizationSettings)}
+                    className={`rounded-lg border px-2.5 py-2 text-xs font-mono transition ${
+                      showDiarizationSettings
+                        ? "border-lime-400 bg-lime-400/20 text-lime-300"
+                        : "border-stone-800 bg-stone-900 text-stone-400 hover:text-stone-200"
+                    }`}
+                    title="Configure local diarization thresholds"
+                  >
+                    ⚙️ Thresholds
+                  </button>
+                )}
+              </div>
+
               <button
                 type="button"
                 disabled={transcribing}
@@ -901,6 +936,68 @@ function MeetingDetailView({
               </button>
             </div>
           </header>
+
+          {/* Expandable Diarization Threshold Tuning */}
+          {showDiarizationSettings && selectedProvider === "local" && (
+            <div className="rounded-xl border border-stone-800 bg-stone-900/90 p-4 space-y-3 backdrop-blur">
+              <div className="flex items-center justify-between border-b border-stone-800 pb-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-lime-400">
+                  🎙️ Diarization & Voiceprint Thresholds for this Transcription
+                </span>
+                <span className="text-[11px] text-stone-500 font-mono">Overrides Global Settings</span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 pt-1">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <label htmlFor="meeting-clustering-slider" className="text-stone-300 font-medium">
+                      Within-Meeting Clustering Threshold:
+                    </label>
+                    <span className="font-mono font-bold text-lime-400">
+                      {customClusteringThreshold.toFixed(2)}
+                    </span>
+                  </div>
+                  <input
+                    id="meeting-clustering-slider"
+                    type="range"
+                    min="0.50"
+                    max="0.98"
+                    step="0.01"
+                    value={customClusteringThreshold}
+                    onChange={(e) => setCustomClusteringThreshold(parseFloat(e.target.value))}
+                    className="w-full accent-lime-400 cursor-pointer"
+                  />
+                  <p className="text-[10px] text-stone-500">
+                    Controls separation of distinct voices in this meeting. Recommended: 0.85.
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <label htmlFor="meeting-similarity-slider" className="text-stone-300 font-medium">
+                      Enrolled Speaker Recognition Sensitivity:
+                    </label>
+                    <span className="font-mono font-bold text-cyan-400">
+                      {customSimilarityThreshold.toFixed(2)}
+                    </span>
+                  </div>
+                  <input
+                    id="meeting-similarity-slider"
+                    type="range"
+                    min="0.50"
+                    max="0.98"
+                    step="0.01"
+                    value={customSimilarityThreshold}
+                    onChange={(e) => setCustomSimilarityThreshold(parseFloat(e.target.value))}
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                  <p className="text-[10px] text-stone-500">
+                    Cosine similarity threshold to recognize known people. Recommended: 0.85.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Speakers summary */}
           {detail.speakers.length > 0 && (
@@ -2394,6 +2491,8 @@ function LlmSettingsModal({
   const [thinkingLevel, setThinkingLevel] = useState<string>("off");
   const [apiKey, setApiKey] = useState<string>("");
   const [baseUrl, setBaseUrl] = useState<string>("");
+  const [localClusteringThreshold, setLocalClusteringThreshold] = useState<number>(0.85);
+  const [localSimilarityThreshold, setLocalSimilarityThreshold] = useState<number>(0.85);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshingCatalog, setRefreshingCatalog] = useState(false);
@@ -2406,10 +2505,11 @@ function LlmSettingsModal({
     setLoading(true);
     setError(null);
     try {
-      const [configRes, provRes, modelsRes] = await Promise.all([
+      const [configRes, provRes, modelsRes, appCfgRes] = await Promise.all([
         fetch("/api/llm/config"),
         fetch("/api/llm/providers"),
-        fetch("/api/llm/models")
+        fetch("/api/llm/models"),
+        fetch("/api/config")
       ]);
 
       if (configRes.ok) {
@@ -2421,6 +2521,16 @@ function LlmSettingsModal({
         }
         const provConfig = config.providers?.[config.defaultProvider || "google"];
         setBaseUrl(provConfig?.baseUrl || "");
+      }
+
+      if (appCfgRes.ok) {
+        const appCfg = await appCfgRes.json();
+        if (appCfg.localClusteringThreshold !== undefined) {
+          setLocalClusteringThreshold(appCfg.localClusteringThreshold);
+        }
+        if (appCfg.localSimilarityThreshold !== undefined) {
+          setLocalSimilarityThreshold(appCfg.localSimilarityThreshold);
+        }
       }
 
       if (provRes.ok) {
@@ -2539,15 +2649,30 @@ function LlmSettingsModal({
         }
       };
 
-      const res = await fetch("/api/llm/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
+      const [resLlm, resApp] = await Promise.all([
+        fetch("/api/llm/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }),
+        fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            localClusteringThreshold,
+            localSimilarityThreshold
+          })
+        })
+      ]);
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Failed to save configuration");
+      if (!resLlm.ok) {
+        const data = await resLlm.json();
+        throw new Error(data.error || "Failed to save LLM configuration");
+      }
+
+      if (!resApp.ok) {
+        const data = await resApp.json();
+        throw new Error(data.error || "Failed to save audio settings");
       }
 
       onSaved();
@@ -2693,6 +2818,66 @@ function LlmSettingsModal({
                 placeholder="e.g. http://localhost:11434/v1 for Ollama, or custom LiteLLM proxy"
                 className="w-full rounded-lg border border-stone-700 bg-stone-950 px-3 py-2 text-sm text-stone-100 placeholder-stone-600 focus:border-lime-400 focus:outline-none font-mono"
               />
+            </div>
+
+            {/* Local Audio Diarization & Speaker Recognition Settings */}
+            <div className="rounded-xl border border-stone-800 bg-stone-950/60 p-4 space-y-3.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wider text-stone-300">
+                  🎙️ Local Speaker Diarization & Recognition
+                </span>
+                <span className="text-[11px] text-stone-500 font-mono">Sensitivity Tuning</span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <label htmlFor="clustering-threshold-slider" className="text-stone-300 font-medium">
+                      Within-Meeting Clustering:
+                    </label>
+                    <span className="font-mono font-bold text-lime-400">
+                      {localClusteringThreshold.toFixed(2)}
+                    </span>
+                  </div>
+                  <input
+                    id="clustering-threshold-slider"
+                    type="range"
+                    min="0.50"
+                    max="0.98"
+                    step="0.01"
+                    value={localClusteringThreshold}
+                    onChange={(e) => setLocalClusteringThreshold(parseFloat(e.target.value))}
+                    className="w-full accent-lime-400 cursor-pointer"
+                  />
+                  <p className="text-[11px] text-stone-500 leading-tight">
+                    Higher (0.80–0.90) separates similar voices; lower (0.60–0.75) merges similar utterances into one speaker.
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <label htmlFor="similarity-threshold-slider" className="text-stone-300 font-medium">
+                      Enrolled Voiceprint Matching:
+                    </label>
+                    <span className="font-mono font-bold text-cyan-400">
+                      {localSimilarityThreshold.toFixed(2)}
+                    </span>
+                  </div>
+                  <input
+                    id="similarity-threshold-slider"
+                    type="range"
+                    min="0.50"
+                    max="0.98"
+                    step="0.01"
+                    value={localSimilarityThreshold}
+                    onChange={(e) => setLocalSimilarityThreshold(parseFloat(e.target.value))}
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                  <p className="text-[11px] text-stone-500 leading-tight">
+                    Minimum cosine similarity required to match speech against enrolled speaker voiceprints across meetings.
+                  </p>
+                </div>
+              </div>
             </div>
 
             {testResult && (

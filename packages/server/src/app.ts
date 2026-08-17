@@ -3,6 +3,7 @@ import { join, normalize, relative } from "node:path";
 import { Hono } from "hono";
 import type { Kysely } from "kysely";
 import type { Database, LogItem, LogLevel } from "@olive/shared";
+import { loadAppConfig, saveAppConfig } from "./config.ts";
 import { getDb } from "./db.ts";
 import { resolvePaths } from "./paths.ts";
 import { getMeeting, listMeetings } from "./meetings.ts";
@@ -326,6 +327,7 @@ export function createApp(options: AppOptions = {}): Hono {
       pollIntervalMs?: number;
       maxPollWaitMs?: number;
       similarityThreshold?: number;
+      clusteringThreshold?: number;
     } = {};
     try {
       body = (await c.req.json()) as typeof body;
@@ -334,6 +336,17 @@ export function createApp(options: AppOptions = {}): Hono {
     }
 
     try {
+      let similarityThreshold = body.similarityThreshold;
+      let clusteringThreshold = body.clusteringThreshold;
+
+      if (similarityThreshold === undefined || clusteringThreshold === undefined) {
+        try {
+          const cfg = loadAppConfig(paths);
+          if (similarityThreshold === undefined) similarityThreshold = cfg.localSimilarityThreshold;
+          if (clusteringThreshold === undefined) clusteringThreshold = cfg.localClusteringThreshold;
+        } catch {}
+      }
+
       const result = await transcriptionService.transcribeMeeting(meetingId, {
         provider: body.provider,
         language: body.language,
@@ -341,7 +354,8 @@ export function createApp(options: AppOptions = {}): Hono {
         force: body.force,
         pollIntervalMs: body.pollIntervalMs,
         maxPollWaitMs: body.maxPollWaitMs,
-        similarityThreshold: body.similarityThreshold
+        similarityThreshold,
+        clusteringThreshold
       });
 
       return c.json(result, result.status === "error" ? 502 : 200);
@@ -728,6 +742,27 @@ export function createApp(options: AppOptions = {}): Hono {
     try {
       const updated = await llmService.updateSettings(body as any);
       return c.json({ status: "updated", settings: updated });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.get("/api/config", (c) => {
+    try {
+      const config = loadAppConfig(paths);
+      return c.json(config);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/config", async (c) => {
+    try {
+      const body = await c.req.json();
+      const current = loadAppConfig(paths);
+      const merged = { ...current, ...(body as object) };
+      const updated = saveAppConfig(merged, paths);
+      return c.json({ status: "updated", config: updated });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }

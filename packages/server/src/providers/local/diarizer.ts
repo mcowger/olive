@@ -2,7 +2,7 @@ import type { LocalDiarizerConfig, LocalSpeakerSegment, VoiceprintVector } from 
 import { cosineSimilarity, type SpeakerEmbeddingExtractorInterface } from "./embedding.ts";
 
 export interface DiarizerInterface {
-  diarize(samples: Float32Array, sampleRate: number): Promise<LocalSpeakerSegment[]>;
+  diarize(samples: Float32Array, sampleRate?: number, clusteringThresholdOverride?: number): Promise<LocalSpeakerSegment[]>;
 }
 
 export class LocalSpeakerDiarizer implements DiarizerInterface {
@@ -24,11 +24,16 @@ export class LocalSpeakerDiarizer implements DiarizerInterface {
     };
   }
 
-  async diarize(samples: Float32Array, sampleRate = 16000): Promise<LocalSpeakerSegment[]> {
+  async diarize(
+    samples: Float32Array,
+    sampleRate = 16000,
+    clusteringThresholdOverride?: number
+  ): Promise<LocalSpeakerSegment[]> {
     if (samples.length === 0) {
       return [];
     }
 
+    const effectiveClusteringThreshold = clusteringThresholdOverride ?? this.config.clusteringThreshold;
     const totalDurationMs = Math.round((samples.length / sampleRate) * 1000);
 
     // 1. Voice Activity Detection (VAD) to find speech intervals
@@ -104,7 +109,7 @@ export class LocalSpeakerDiarizer implements DiarizerInterface {
           candidateSegments[j].embedding
         );
 
-        if (sim >= this.config.clusteringThreshold) {
+        if (sim >= effectiveClusteringThreshold) {
           candidateSegments[j].clusterId = nextClusterId;
         }
       }

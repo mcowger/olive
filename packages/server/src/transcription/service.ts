@@ -47,6 +47,7 @@ export interface TranscribeMeetingOptions {
   maxPollWaitMs?: number;
   force?: boolean;
   similarityThreshold?: number;
+  clusteringThreshold?: number;
 }
 
 export interface TranscribeMeetingResult {
@@ -261,7 +262,8 @@ export class TranscriptionService {
         audioPath: audioFullPath,
         language: options.language,
         enrolledSpeakers,
-        similarityThreshold: options.similarityThreshold
+        similarityThreshold: options.similarityThreshold,
+        clusteringThreshold: options.clusteringThreshold
       });
 
       // 3. Write artifacts to disk

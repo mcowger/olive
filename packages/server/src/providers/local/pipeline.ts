@@ -22,6 +22,7 @@ export interface TranscribeAudioOptions {
   language?: string;
   enrolledSpeakers?: EnrolledSpeaker[];
   similarityThreshold?: number;
+  clusteringThreshold?: number;
 }
 
 export class LocalTranscriptionPipeline {
@@ -65,7 +66,11 @@ export class LocalTranscriptionPipeline {
     const durationMs = decoded.durationMs;
 
     // 2. Perform Speaker Diarization
-    const speakerSegments = await this.diarizer.diarize(samples, targetSampleRate);
+    const speakerSegments = await this.diarizer.diarize(
+      samples,
+      targetSampleRate,
+      options.clusteringThreshold
+    );
 
     // 3. Prepare enrolled speaker voiceprints for cross-recording matching
     const enrolledProfiles = new Map<string, { id: string; name: string; centroid: VoiceprintVector }>();

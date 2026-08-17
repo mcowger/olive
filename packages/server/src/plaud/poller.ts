@@ -158,17 +158,51 @@ function mimeForExtension(extension: string): string {
   return mimeTypes[extension] || "application/octet-stream";
 }
 
-function summaryToMarkdown(notes: Array<{ type: string; content: string }>): string {
+export function cleanPlaudSummaryMarkdown(content: string): string {
+  if (!content) return "";
+  let text = content.trim();
+
+  // Strip leading headers like "## Auto_sum_note", "# Auto_sum_note", "Auto_sum_note"
+  text = text.replace(/^#+\s*Auto_sum_note\s*\n*/i, "");
+  text = text.replace(/^Auto_sum_note\s*\n*/i, "");
+
+  // Strip leading horizontal rules / separators (---, ***, ___)
+  text = text.replace(/^(?:[-*_]{3,}\s*\n*)+/, "");
+
+  // Strip leading generic filler if present
+  text = text.replace(/^Of course\. Here is the analysis of the conversation transcript you provided\.\s*\n*/i, "");
+  text = text.replace(/^(?:[-*_]{3,}\s*\n*)+/, "");
+
+  return text.trim();
+}
+
+export function summaryToMarkdown(notes: Array<{ type: string; content: string }>): string {
   if (notes.length === 0) {
     return "";
   }
 
-  return `${notes
-    .map((note) => {
+  const sections: string[] = [];
+
+  for (const note of notes) {
+    const cleaned = cleanPlaudSummaryMarkdown(note.content || "");
+    if (!cleaned) continue;
+
+    const typeLower = (note.type || "").trim().toLowerCase();
+    const isAutoSum =
+      typeLower === "auto_sum_note" ||
+      typeLower === "summary" ||
+      typeLower === "auto_sum" ||
+      typeLower === "";
+
+    if (isAutoSum) {
+      sections.push(cleaned);
+    } else {
       const heading = note.type.trim() || "Summary";
-      return `## ${heading.charAt(0).toUpperCase()}${heading.slice(1)}\n\n${note.content}`;
-    })
-    .join("\n\n")}\n`;
+      sections.push(`## ${heading.charAt(0).toUpperCase()}${heading.slice(1)}\n\n${cleaned}`);
+    }
+  }
+
+  return sections.length > 0 ? `${sections.join("\n\n")}\n` : "";
 }
 
 function contentIsReady(detail: FileDetail): boolean {

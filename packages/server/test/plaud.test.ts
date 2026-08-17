@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileDetail, FileSummary } from "@mcowger/plaud-client";
 import { createApp } from "../src/app.ts";
 import { createDb } from "../src/db.ts";
-import { PlaudPoller, type PlaudClientLike, type PlaudOAuthManager } from "../src/plaud/poller.ts";
+import { PlaudPoller, cleanPlaudSummaryMarkdown, summaryToMarkdown, type PlaudClientLike, type PlaudOAuthManager } from "../src/plaud/poller.ts";
 import { createPlaudClient } from "../src/plaud/client.ts";
 
 const AUDIO_BYTES = new TextEncoder().encode("fake plaud audio");
@@ -414,13 +414,33 @@ test.skipIf(!shouldRunLivePlaud)("runs one poll against the live Plaud account",
   } else {
     expect(meetings).toHaveLength(0);
   }
-  console.log(
-    `Live Plaud poll: discovered=${result.discovered}, meetings=${meetings.length}, recordings=${recordings.length}, artifacts=${artifacts.length}, pending=${result.pcsPending}`
-  );
 
   await closeDatabase(handle);
   await rm(meetingsDir, { recursive: true, force: true });
 }, 120_000);
+
+test("cleanPlaudSummaryMarkdown suppresses Auto_sum_note heading and leading separators", () => {
+  const rawNote = `## Auto_sum_note
+
+---
+**Project Requirements**
+- Item 1
+- Item 2`;
+
+  const cleaned = cleanPlaudSummaryMarkdown(rawNote);
+  expect(cleaned).not.toContain("Auto_sum_note");
+  expect(cleaned).not.toStartWith("---");
+  expect(cleaned).toStartWith("**Project Requirements**");
+
+  const converted = summaryToMarkdown([
+    {
+      type: "auto_sum_note",
+      content: rawNote
+    }
+  ]);
+  expect(converted).not.toContain("Auto_sum_note");
+  expect(converted).toStartWith("**Project Requirements**");
+});
 
 function dateFolder(startTimeMs: number, title: string, id: string): string {
   const date = new Date(startTimeMs);

@@ -12,11 +12,13 @@
     "build:web": "bun run packages/web/build.ts",
     "deploy:staging": "bun run scripts/deploy-staging.ts",
     "dev": "bun run dev.ts",
+    "check": "bun run --parallel typecheck build",
     "dev:server": "bun --watch packages/server/src/index.ts",
     "dev:web": "bun run packages/web/dev.ts",
     "start": "bun run packages/server/src/index.ts",
     "start:server": "bun run packages/server/src/index.ts",
     "test": "bun test",
+    "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json && tsc --noEmit -p packages/web/tsconfig.json"
   },
   "devDependencies": {

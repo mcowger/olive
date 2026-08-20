@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Stage 1: Fetch Llama.cpp Vulkan Binaries (~30MB archive)
-FROM oven/bun:1.3.14 AS llama-fetcher
+FROM oven/bun:1.4.0 AS llama-fetcher
 WORKDIR /llama
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar && rm -rf /var/lib/apt/lists/*
@@ -12,7 +12,7 @@ RUN mkdir -p /llama/bin && \
     rm /llama/llama.tar.gz
 
 # Stage 2: Application Dependencies and Web Build
-FROM oven/bun:1.3.14 AS app-builder
+FROM oven/bun:1.4.0 AS app-builder
 WORKDIR /app
 
 COPY package.json bun.lock ./
@@ -30,7 +30,7 @@ COPY packages/web ./packages/web
 RUN bun run build:web
 
 # Stage 3: Production Runtime
-FROM oven/bun:1.3.14 AS runner
+FROM oven/bun:1.4.0 AS runner
 WORKDIR /app
 
 # Install runtime system utilities, audio processing, and Vulkan / Mesa GPU drivers

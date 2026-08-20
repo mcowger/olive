@@ -28,13 +28,15 @@ if (!tailwind.success) {
 
 try {
   rmSync("packages/web/dist", { recursive: true, force: true });
-  const result = await Bun.build({
+  const buildOptions = {
     entrypoints: ["packages/web/src/index.html"],
     outdir: "packages/web/dist",
     publicPath: "/",
     minify: true,
-    target: "browser"
-  });
+    target: "browser",
+    reactCompiler: true
+  } as Parameters<typeof Bun.build>[0] & { reactCompiler: boolean };
+  const result = await Bun.build(buildOptions);
 
   if (!result.success) {
     for (const log of result.logs) {

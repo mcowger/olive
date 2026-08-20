@@ -6,7 +6,7 @@
 
 A private, self-hosted system that ingests audio from hardware voice recorders, mobile voice memos, and browser uploads — automatically transcribing, diarizing with neural speaker identification, and generating structured AI summaries with customizable templates.
 
-[![Bun](https://img.shields.io/badge/Bun-1.3+-black?style=flat-square&logo=bun)](https://bun.sh)
+[![Bun](https://img.shields.io/badge/Bun-1.4+-black?style=flat-square&logo=bun)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-19-61dafb?style=flat-square&logo=react)](https://react.dev/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-v3-38bdf8?style=flat-square&logo=tailwindcss)](https://tailwindcss.com/)
@@ -161,7 +161,7 @@ SOURCES                           PIPELINE & ARTIFACT STORE                     
 ## 🚀 Quickstart
 
 ### Prerequisites
-- [Bun](https://bun.sh) (v1.2+)
+- [Bun](https://bun.sh) (v1.4+)
 - `ffmpeg` (for local audio decoding)
 - (Optional) Vulkan drivers / GPU for local ASR acceleration
 

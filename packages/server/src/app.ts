@@ -8,7 +8,7 @@ import { logger } from "./logger.ts";
 import { loadAppConfig, saveAppConfig } from "./config.ts";
 import { getDb } from "./db.ts";
 import { resolvePaths } from "./paths.ts";
-import { deleteMeeting, getMeeting, listMeetings } from "./meetings.ts";
+import { deleteMeeting, getMeeting, listMeetings, updateMeetingTags } from "./meetings.ts";
 import { createPlaudClient } from "./plaud/client.ts";
 import { PlaudAuthSessionStore } from "./plaud/auth.ts";
 import { PlaudPoller, type PlaudClientLike, type PlaudOAuthManager } from "./plaud/poller.ts";
@@ -347,6 +347,26 @@ export function createApp(options: AppOptions = {}): Hono {
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
+  });
+
+  app.put("/api/meetings/:id/tags", async (c) => {
+    const meetingId = c.req.param("id");
+    let body: { tags?: unknown };
+    try {
+      body = (await c.req.json()) as { tags?: unknown };
+    } catch {
+      return c.json({ error: "JSON body required" }, 400);
+    }
+
+    if (!Array.isArray(body.tags) || !body.tags.every((t) => typeof t === "string")) {
+      return c.json({ error: "tags must be an array of strings" }, 400);
+    }
+
+    const updated = await updateMeetingTags(db, meetingId, body.tags);
+    if (!updated) {
+      return c.json({ error: "Meeting not found" }, 404);
+    }
+    return c.json({ meeting: updated });
   });
 
   app.get("/api/meetings/:id/chat/messages", async (c) => {

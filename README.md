@@ -224,6 +224,8 @@ Olive stores dynamic settings in `<data>/config/settings.json`, and accepts envi
 | `SPEECHMATICS_API_KEY` | *(optional)* | API key for Speechmatics cloud transcription & diarization |
 | `SPEECHMATICS_WEBHOOK_SECRET` | *(optional)* | Secret used to sign and verify Speechmatics webhook callbacks |
 
+The default transcription engine is configured in **LLM Provider & Model Settings → Automatic Transcription Engine**. Local transcription is the default; choose Speechmatics there only when `SPEECHMATICS_API_KEY` is configured.
+
 ---
 
 ## 📱 Integrations

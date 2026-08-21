@@ -33,6 +33,7 @@ export interface IngestServiceOptions {
   db: Kysely<Database>;
   meetingsDir: string;
   transcriptionService?: TranscriptionService;
+  defaultTranscriptionProvider?: "speechmatics" | "local";
   logger?: Logger;
   now?: () => number;
 }
@@ -115,6 +116,7 @@ export class IngestService {
   private readonly db: Kysely<Database>;
   private readonly meetingsDir: string;
   private readonly transcriptionService?: TranscriptionService;
+  private defaultTranscriptionProvider: "speechmatics" | "local";
   private readonly logger: Logger;
   private readonly now: () => number;
 
@@ -122,8 +124,13 @@ export class IngestService {
     this.db = options.db;
     this.meetingsDir = options.meetingsDir;
     this.transcriptionService = options.transcriptionService;
+    this.defaultTranscriptionProvider = options.defaultTranscriptionProvider ?? "local";
     this.logger = options.logger ?? defaultLogger;
     this.now = options.now ?? Date.now;
+  }
+
+  setDefaultTranscriptionProvider(provider: "speechmatics" | "local"): void {
+    this.defaultTranscriptionProvider = provider;
   }
 
   async ingestAudio(options: IngestAudioOptions): Promise<IngestAudioResult> {
@@ -256,12 +263,12 @@ export class IngestService {
       this.logger.debug("Triggering auto-transcription after audio ingest", {
         category: "transcription",
         meetingId,
-        provider: options.transcriptionProvider || "speechmatics"
+        provider: options.transcriptionProvider || this.defaultTranscriptionProvider
       });
 
       void this.transcriptionService
         .transcribeMeeting(meetingId, {
-          provider: options.transcriptionProvider || "speechmatics",
+          provider: options.transcriptionProvider || this.defaultTranscriptionProvider,
           modelId: options.modelId
         })
         .catch((err) => {

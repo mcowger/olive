@@ -92,7 +92,7 @@ export class TranscriptionService {
   private readonly meetingsDir: string;
   private readonly client: SpeechmaticsClient;
   private readonly localPipeline: LocalTranscriptionRunner;
-  private readonly defaultProvider: TranscriptionProviderName;
+  private defaultProvider: TranscriptionProviderName;
   private readonly logger: Logger;
   private readonly webhookUrl?: string;
   private readonly webhookSecret?: string;
@@ -172,6 +172,10 @@ export class TranscriptionService {
 
   setSummaryService(service: SummaryService): void {
     this.summaryService = service;
+  }
+
+  setDefaultProvider(provider: TranscriptionProviderName): void {
+    this.defaultProvider = provider;
   }
 
   private async autoSummarize(meetingId: string): Promise<void> {
@@ -693,7 +697,7 @@ export class TranscriptionService {
       : undefined;
 
     await options.onProgress?.({
-      stage: "diarizing",
+      stage: "uploading",
       percent: 15,
       message: "Uploading audio to Speechmatics Cloud API..."
     });
@@ -749,6 +753,13 @@ export class TranscriptionService {
         .set({ last_error: errorMsg, updated_at: currentTime })
         .where("id", "=", meetingId)
         .execute();
+
+      await options.onProgress?.({
+        stage: "error",
+        percent: 0,
+        message: errorMsg,
+        error: errorMsg
+      });
 
       return {
         stageRunId,
@@ -922,6 +933,13 @@ export class TranscriptionService {
           .where("id", "=", meetingId)
           .execute();
 
+        await onProgress?.({
+          stage: "error",
+          percent: 0,
+          message: errorMsg,
+          error: errorMsg
+        });
+
         return {
           stageRunId,
           jobId,
@@ -934,10 +952,22 @@ export class TranscriptionService {
     }
 
     const timeoutError = `Speechmatics job timed out after ${maxWaitMs}ms`;
+    const timeoutAt = this.now();
+    await this.db
+      .updateTable("stage_runs")
+      .set({ status: "error", last_error: timeoutError, finished_at: timeoutAt, updated_at: timeoutAt })
+      .where("id", "=", stageRunId)
+      .execute();
+    await this.db
+      .updateTable("meetings")
+      .set({ last_error: timeoutError, updated_at: timeoutAt })
+      .where("id", "=", meetingId)
+      .execute();
+    await onProgress?.({ stage: "error", percent: 0, message: timeoutError, error: timeoutError });
     return {
       stageRunId,
       jobId,
-      status: "running",
+      status: "error",
       error: timeoutError
     };
   }

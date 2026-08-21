@@ -37,6 +37,47 @@ export interface LlmServiceOptions {
   configDir?: string;
 }
 
+function toPiContextMessages(
+  messages: NonNullable<LlmGenerateOptions["messages"]>,
+  model: Model<any>,
+  timestamp: number
+): Context["messages"] {
+  return messages.map((message) => {
+    const messageTimestamp = message.timestamp ?? timestamp;
+    if (message.role === "user") {
+      return {
+        role: "user" as const,
+        content: message.content,
+        timestamp: messageTimestamp
+      };
+    }
+
+    return {
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text: message.content }],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0
+        }
+      },
+      stopReason: "stop" as const,
+      timestamp: messageTimestamp
+    };
+  });
+}
+
 const PROVIDER_ENV_KEY_MAP: Record<string, string[]> = {
   google: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
   anthropic: ["ANTHROPIC_API_KEY"],
@@ -588,13 +629,15 @@ export class LlmService {
 
     const context: Context = {
       systemPrompt: options.systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: options.prompt,
-          timestamp: startTime
-        }
-      ]
+      messages: options.messages?.length
+        ? toPiContextMessages(options.messages, model, startTime)
+        : [
+            {
+              role: "user",
+              content: options.prompt,
+              timestamp: startTime
+            }
+          ]
     };
 
     const streamOptions: Record<string, any> = {
@@ -665,7 +708,7 @@ export class LlmService {
 
   async streamText(
     options: LlmGenerateOptions,
-    onDelta: (delta: string) => void
+    onDelta: (delta: string) => void | Promise<void>
   ): Promise<LlmGenerateResult> {
     const startTime = Date.now();
     const settings = await this.getSettings();
@@ -684,13 +727,15 @@ export class LlmService {
 
     const context: Context = {
       systemPrompt: options.systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: options.prompt,
-          timestamp: startTime
-        }
-      ]
+      messages: options.messages?.length
+        ? toPiContextMessages(options.messages, model, startTime)
+        : [
+            {
+              role: "user",
+              content: options.prompt,
+              timestamp: startTime
+            }
+          ]
     };
 
     const streamOptions: Record<string, any> = {
@@ -726,7 +771,7 @@ export class LlmService {
     for await (const event of stream) {
       if (event.type === "text_delta") {
         fullText += event.delta;
-        onDelta(event.delta);
+        await onDelta(event.delta);
       } else if (event.type === "done") {
         finalMessage = (event as any).message || (event as any).partial;
       } else if (event.type === "error") {

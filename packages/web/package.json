@@ -8,6 +8,7 @@
     "dev": "bun run dev.ts"
   },
   "dependencies": {
+    "@assistant-ui/react": "^0.15.16",
     "@olive/shared": "workspace:*",
     "@types/dompurify": "^3.0.5",
     "dompurify": "^3.2.4",

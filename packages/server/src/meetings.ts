@@ -214,6 +214,23 @@ export async function listMeetings(
   };
 }
 
+export async function updateMeetingTags(
+  db: Kysely<Database>,
+  id: string,
+  tags: string[]
+): Promise<MeetingListItem | null> {
+  const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
+
+  await db
+    .updateTable("meetings")
+    .set({ tags: JSON.stringify(normalized), updated_at: Date.now() })
+    .where("id", "=", id)
+    .execute();
+
+  const row = await db.selectFrom("meetings").selectAll().where("id", "=", id).executeTakeFirst();
+  return row ? toMeeting(row) : null;
+}
+
 export async function getMeeting(
   db: Kysely<Database>,
   id: string,

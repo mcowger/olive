@@ -943,6 +943,18 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
                     <span>•</span>
                     <span className="capitalize">{meeting.source}</span>
                   </div>
+                  {meeting.tags.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      {meeting.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full border border-stone-700 bg-stone-800/80 px-2 py-0.5 text-[11px] text-stone-300"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   {activeProgressMap[meeting.id] ? (
@@ -1055,6 +1067,43 @@ function MeetingDetailView({
   const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
   const playbackStopMsRef = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [newTagInput, setNewTagInput] = useState("");
+  const [savingTags, setSavingTags] = useState(false);
+
+  const saveTags = async (nextTags: string[]) => {
+    setSavingTags(true);
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/tags`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: nextTags })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { meeting: MeetingListItem };
+      setDetail((prev) => (prev ? { ...prev, meeting: { ...prev.meeting, tags: data.meeting.tags } } : prev));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update tags");
+    } finally {
+      setSavingTags(false);
+    }
+  };
+
+  const handleAddTag = () => {
+    const tag = newTagInput.trim();
+    if (!tag) return;
+    const current = detail?.meeting.tags ?? [];
+    if (current.includes(tag)) {
+      setNewTagInput("");
+      return;
+    }
+    setNewTagInput("");
+    void saveTags([...current, tag]);
+  };
+
+  const handleRemoveTag = (tag: string) => {
+    const current = detail?.meeting.tags ?? [];
+    void saveTags(current.filter((t) => t !== tag));
+  };
 
   const fetchDetail = async () => {
     setLoading(true);
@@ -1576,6 +1625,39 @@ function MeetingDetailView({
                 <span>{formatDuration(detail.meeting.endTime - detail.meeting.startTime)}</span>
                 <span>•</span>
                 <span className="capitalize">{detail.meeting.source}</span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                {detail.meeting.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-stone-700 bg-stone-800/80 pl-2.5 pr-1.5 py-1 text-xs text-stone-200"
+                  >
+                    {tag}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTag(tag)}
+                      disabled={savingTags}
+                      className="text-stone-500 hover:text-rose-400 transition disabled:opacity-50"
+                      aria-label={`Remove tag ${tag}`}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+                <input
+                  type="text"
+                  value={newTagInput}
+                  onChange={(e) => setNewTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleAddTag();
+                    }
+                  }}
+                  placeholder="+ Add tag"
+                  disabled={savingTags}
+                  className="w-24 rounded-full border border-dashed border-stone-700 bg-transparent px-2.5 py-1 text-xs text-stone-200 placeholder:text-stone-500 focus:w-32 focus:border-lime-400 focus:outline-none transition-all disabled:opacity-50"
+                />
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">

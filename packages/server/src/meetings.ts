@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
 import type {
@@ -320,4 +320,40 @@ export async function getMeeting(
     summaryContent,
     summaries
   };
+}
+
+export async function deleteMeeting(db: Kysely<Database>, id: string, meetingsDir?: string): Promise<boolean> {
+  const meetingRow = await db.selectFrom("meetings").selectAll().where("id", "=", id).executeTakeFirst();
+  if (!meetingRow) {
+    return false;
+  }
+
+  await db.transaction().execute(async (trx) => {
+    // Clear the meeting's references to artifacts first to avoid FK violations.
+    await trx
+      .updateTable("meetings")
+      .set({ primary_transcript_artifact_id: null, primary_summary_artifact_id: null })
+      .where("id", "=", id)
+      .execute();
+
+    await trx.deleteFrom("meeting_speakers").where("meeting_id", "=", id).execute();
+    await trx.deleteFrom("stage_runs").where("meeting_id", "=", id).execute();
+    await trx.deleteFrom("plaud_ingest_state").where("meeting_id", "=", id).execute();
+    await trx.deleteFrom("chat_messages").where("meeting_id", "=", id).execute();
+    await trx.deleteFrom("logs").where("meeting_id", "=", id).execute();
+    await trx.deleteFrom("artifacts").where("meeting_id", "=", id).execute();
+    await trx.deleteFrom("recordings").where("meeting_id", "=", id).execute();
+    await trx.deleteFrom("meetings").where("id", "=", id).execute();
+  });
+
+  if (meetingsDir) {
+    const folder = meetingPaths(meetingsDir, meetingRow.start_time, meetingRow.title, meetingRow.id).folder;
+    try {
+      await rm(folder, { recursive: true, force: true });
+    } catch {
+      // folder may not exist on disk
+    }
+  }
+
+  return true;
 }

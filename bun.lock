@@ -28,6 +28,7 @@
         "@earendil-works/pi-ai": "^0.84.2",
         "@huggingface/transformers": "^4.2.0",
         "@mcowger/plaud-client": "^0.1.0",
+        "@modelcontextprotocol/server": "^2.0.0",
         "@oh-my-pi/pi-ai": "^17.3.5",
         "@oh-my-pi/pi-catalog": "^17.3.5",
         "@olive/shared": "workspace:*",
@@ -215,6 +216,10 @@
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
     "@mcowger/plaud-client": ["@mcowger/plaud-client@0.1.0", "", { "dependencies": { "zod": "^4.4.3" }, "bin": { "plaud-client": "dist/cli.js" } }, "sha512-zCW6HwbWGCj8KHF9ChZjbmKQH+GVc935yOaqYzeMdJ74wpAS6l4zPB6QNVWakgz7McJcaxwnu+Sqew401CC3xQ=="],
+
+    "@modelcontextprotocol/core": ["@modelcontextprotocol/core@2.0.0", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-pJCEwGG7Lfr/+PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG+RjhsvS1FKrDbKux+M1HhlnGWqcA=="],
+
+    "@modelcontextprotocol/server": ["@modelcontextprotocol/server@2.0.0", "", { "dependencies": { "@modelcontextprotocol/core": "2.0.0", "zod": "^4.2.0" } }, "sha512-YhHWdHfpFMQfd0prsEnxKeS3Qz3ytIGmsS0sth4KDjnacIT7hxk6hXHkJ9KysxlkvTM+WZAtQbbcUhdoP4Hvtw=="],
 
     "@nodelib/fs.scandir": ["@nodelib/fs.scandir@2.1.5", "", { "dependencies": { "@nodelib/fs.stat": "2.0.5", "run-parallel": "^1.1.9" } }, "sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g=="],
 

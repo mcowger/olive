@@ -91,6 +91,12 @@ database is empty. `limit` defaults to `50` and is capped at `100`; `offset` def
 }
 ```
 
+## `/mcp`
+
+Provides Olive's read-only Model Context Protocol endpoint on the same port as the HTTP API. It supports `list_meetings`, `get_meeting`, `search_transcripts`, `get_action_items`, `list_speakers`, and `get_speaker_profile`.
+
+Authentication uses `Authorization: Bearer <OLIVE_MCP_TOKEN>`. If `OLIVE_MCP_TOKEN` is unset, `OLIVE_INGEST_TOKEN` is used as a fallback. When Olive binds to loopback, the endpoint may be used without a token; non-loopback binds require one.
+
 ## `GET /api/meetings/:id`
 
 Returns HTTP 200 with the full meeting aggregate:
@@ -439,4 +445,3 @@ bun run scripts/backup.ts [optional-output-path.tar.gz]
 ```bash
 bun run scripts/restore.ts <path-to-backup.tar.gz>
 ```
-

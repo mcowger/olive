@@ -26,6 +26,8 @@ function createTestContext() {
 
   // Mock llmService.generateText to avoid network calls during tests if needed
   llmService.generateText = async (options) => {
+    // Small delay so background generation states are observable in tests
+    await new Promise((r) => setTimeout(r, 50));
     return {
       text: `# Generated Summary for Prompt\n\nPrompt was:\n${options.prompt.slice(0, 100)}...`,
       provider: options.provider || "google",
@@ -134,6 +136,52 @@ describe("SummaryService", () => {
     expect(meetingDetail?.summaries[0].isPrimary).toBe(true);
   });
 
+  test("startSummaryGeneration runs in background and tracks status", async () => {
+    const { db, meetingsDir, summaryService } = createTestContext();
+    const { meetingId } = await seedMeetingWithTranscript(db, meetingsDir);
+
+    const status = await summaryService.startSummaryGeneration({ meetingId });
+    expect(status.stage).toBe("running");
+    expect(summaryService.getSummaryGenerationStatus(meetingId)?.stage).toBe("running");
+
+    // Duplicate start is rejected while running
+    await expect(summaryService.startSummaryGeneration({ meetingId })).rejects.toThrow(
+      "already in progress"
+    );
+
+    // Wait for the background generation to finish
+    let final = summaryService.getSummaryGenerationStatus(meetingId);
+    for (let i = 0; i < 100 && final?.stage === "running"; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      final = summaryService.getSummaryGenerationStatus(meetingId);
+    }
+
+    expect(final?.stage).toBe("done");
+    expect(final?.artifactId).toBeDefined();
+
+    const meetingDetail = await getMeeting(db, meetingId, meetingsDir);
+    expect(meetingDetail?.summaries.length).toBe(1);
+    expect(meetingDetail?.summaries[0].id).toBe(final?.artifactId);
+  });
+
+  test("startSummaryGeneration validates transcript before backgrounding", async () => {
+    const { db, meetingsDir, summaryService } = createTestContext();
+    const { meetingId } = await seedMeetingWithTranscript(db, meetingsDir);
+
+    // Remove transcript artifacts to simulate a meeting that was never transcribed
+    await db
+      .updateTable("meetings")
+      .set({ primary_transcript_artifact_id: null })
+      .where("id", "=", meetingId)
+      .execute();
+    await db.deleteFrom("artifacts").where("meeting_id", "=", meetingId).execute();
+
+    await expect(summaryService.startSummaryGeneration({ meetingId })).rejects.toThrow(
+      "No transcript found"
+    );
+    expect(summaryService.getSummaryGenerationStatus(meetingId)).toBeNull();
+  });
+
   test("supports generating multiple summaries with different templates", async () => {
     const { db, meetingsDir, summaryService, templateService } = createTestContext();
     const { meetingId } = await seedMeetingWithTranscript(db, meetingsDir);
@@ -193,27 +241,54 @@ describe("Summaries API", () => {
     const { meetingId } = await seedMeetingWithTranscript(db, meetingsDir);
     const app = createApp({ db, meetingsDir, summaryService, llmService, templateService });
 
-    // Generate summary via POST /api/meetings/:id/summarize
+    // Kick off summary generation via POST /api/meetings/:id/summarize (async)
     const res = await app.request(`http://localhost/api/meetings/${meetingId}/summarize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ setPrimary: true })
     });
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(202);
     const body = (await res.json()) as any;
-    expect(body.artifactId).toBeDefined();
+    expect(body.started).toBe(true);
+    expect(body.status.stage).toBe("running");
+
+    // Status endpoint reports the running job
+    const runningRes = await app.request(`http://localhost/api/meetings/${meetingId}/summarize/status`);
+    expect(runningRes.status).toBe(200);
+    const runningBody = (await runningRes.json()) as any;
+    expect(runningBody.generating).toBe(true);
+
+    // Poll the status endpoint until generation completes
+    let artifactId: string | undefined;
+    for (let i = 0; i < 100; i++) {
+      const statusRes = await app.request(`http://localhost/api/meetings/${meetingId}/summarize/status`);
+      const statusBody = (await statusRes.json()) as any;
+      if (statusBody.status?.stage === "done") {
+        artifactId = statusBody.status.artifactId;
+        break;
+      }
+      expect(statusBody.status?.stage).toBe("running");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(artifactId).toBeDefined();
+
+    // Meeting detail includes the finished summary
+    const detailRes = await app.request(`http://localhost/api/meetings/${meetingId}`);
+    const detailBody = (await detailRes.json()) as any;
+    expect(detailBody.summaries.length).toBe(1);
+    expect(detailBody.summaries[0].id).toBe(artifactId);
 
     // Set primary via POST /api/meetings/:id/summaries/:artifactId/primary
     const primaryRes = await app.request(
-      `http://localhost/api/meetings/${meetingId}/summaries/${body.artifactId}/primary`,
+      `http://localhost/api/meetings/${meetingId}/summaries/${artifactId}/primary`,
       { method: "POST" }
     );
     expect(primaryRes.status).toBe(200);
 
     // Delete summary via DELETE /api/meetings/:id/summaries/:artifactId
     const deleteRes = await app.request(
-      `http://localhost/api/meetings/${meetingId}/summaries/${body.artifactId}`,
+      `http://localhost/api/meetings/${meetingId}/summaries/${artifactId}`,
       { method: "DELETE" }
     );
     expect(deleteRes.status).toBe(200);

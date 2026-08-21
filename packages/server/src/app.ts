@@ -280,7 +280,8 @@ export function createApp(options: AppOptions = {}): Hono {
     const activeProgress = transcriptionService.getTranscriptionProgress(meetingId);
     return c.json({
       ...detail,
-      transcriptionProgress: activeProgress
+      transcriptionProgress: activeProgress,
+      summaryGeneration: summaryService.getSummaryGenerationStatus(meetingId)
     });
   });
 
@@ -612,7 +613,7 @@ export function createApp(options: AppOptions = {}): Hono {
     } catch {}
 
     try {
-      const result = await summaryService.generateSummary({
+      const status = await summaryService.startSummaryGeneration({
         meetingId,
         templateId: body.templateId,
         provider: body.provider,
@@ -621,10 +622,16 @@ export function createApp(options: AppOptions = {}): Hono {
         setPrimary: body.setPrimary
       });
 
-      return c.json(result, 201);
+      return c.json({ started: true, status }, 202);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
+  });
+
+  app.get("/api/meetings/:id/summarize/status", (c) => {
+    const meetingId = c.req.param("id");
+    const status = summaryService.getSummaryGenerationStatus(meetingId);
+    return c.json({ generating: status?.stage === "running", status });
   });
 
   app.delete("/api/meetings/:id/summaries/:artifactId", async (c) => {

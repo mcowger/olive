@@ -402,6 +402,17 @@ export interface MeetingSummaryItem {
   isPrimary: boolean;
 }
 
+export interface SummaryGenerationStatus {
+  meetingId: string;
+  stage: "running" | "done" | "error";
+  startedAt: number;
+  provider?: string;
+  model?: string;
+  templateName?: string;
+  artifactId?: string;
+  error?: string;
+}
+
 export interface MeetingDetailAggregate {
   meeting: MeetingListItem;
   recordings: Recording[];
@@ -412,6 +423,7 @@ export interface MeetingDetailAggregate {
   summaryContent?: string | null;
   summaries: MeetingSummaryItem[];
   transcriptionProgress?: TranscriptionProgressUpdate | null;
+  summaryGeneration?: SummaryGenerationStatus | null;
 }
 
 export interface BackupManifestStats {

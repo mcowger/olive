@@ -240,7 +240,7 @@ export interface Transcript {
   }>;
 }
 
-export type TranscriptionProgressStage = "queued" | "decoding" | "diarizing" | "transcribing" | "finalizing" | "done" | "error" | "cancelled";
+export type TranscriptionProgressStage = "queued" | "decoding" | "uploading" | "diarizing" | "transcribing" | "finalizing" | "done" | "error" | "cancelled";
 
 export interface TranscriptionProgressUpdate {
   stage: TranscriptionProgressStage;
@@ -473,5 +473,4 @@ export interface LogListResponse {
   };
   categories: string[];
 }
-
 

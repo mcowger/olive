@@ -3,6 +3,31 @@ import { SpeechmaticsClient } from "../src/providers/speechmatics/client.ts";
 import type { BatchClient } from "@speechmatics/batch-client";
 
 describe("Speechmatics client", () => {
+  test("rejects immediately when no API key is configured", async () => {
+    const client = new SpeechmaticsClient({
+      apiKey: "",
+      batchClient: { createTranscriptionJob: async () => ({ id: "unexpected" }) } as unknown as BatchClient
+    });
+
+    await expect(
+      client.submitJob({ audio: new Uint8Array([1, 2, 3]), filename: "test.m4a" })
+    ).rejects.toThrow("Speechmatics API key is not configured");
+  });
+
+  test("fails a stuck upload instead of waiting indefinitely", async () => {
+    const client = new SpeechmaticsClient({
+      apiKey: "test-api-key",
+      submitTimeoutMs: 5,
+      batchClient: {
+        createTranscriptionJob: async () => await new Promise(() => {})
+      } as unknown as BatchClient
+    });
+
+    await expect(
+      client.submitJob({ audio: new Uint8Array([1, 2, 3]), filename: "test.m4a" })
+    ).rejects.toThrow("Speechmatics upload timed out after 5ms");
+  });
+
   test("submits transcription job with audio and speakers", async () => {
     let capturedInput: any = null;
     let capturedConfig: any = null;

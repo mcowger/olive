@@ -46,6 +46,7 @@ export interface AppOptions {
   backupService?: BackupService;
   speechmaticsWebhookSecret?: string;
   ingestToken?: string;
+  defaultTranscriptionProvider?: "speechmatics" | "local";
 }
 
 function parseJsonField<T>(value: string | null | undefined, fallback: T): T {
@@ -96,6 +97,10 @@ export function createApp(options: AppOptions = {}): Hono {
   const configDir = options.configDir ?? paths.configDir;
   const meetingsDir = options.meetingsDir ?? paths.meetingsDir;
   const backupsDir = options.backupsDir ?? paths.backupsDir;
+  const appConfigPaths = options.configDir
+    ? { ...paths, configDir, settingsPath: join(configDir, "settings.json") }
+    : paths;
+  const configuredProvider = loadAppConfig(appConfigPaths).transcriptionProvider;
   const speechmaticsWebhookSecret = options.speechmaticsWebhookSecret || process.env.SPEECHMATICS_WEBHOOK_SECRET;
 
   const speechmaticsClient = options.speechmaticsClient ?? new SpeechmaticsClient();
@@ -106,6 +111,7 @@ export function createApp(options: AppOptions = {}): Hono {
       db,
       meetingsDir,
       speechmaticsClient,
+      defaultProvider: options.defaultTranscriptionProvider ?? configuredProvider,
       webhookSecret: speechmaticsWebhookSecret
     });
 
@@ -125,7 +131,8 @@ export function createApp(options: AppOptions = {}): Hono {
     new IngestService({
       db,
       meetingsDir,
-      transcriptionService
+      transcriptionService,
+      defaultTranscriptionProvider: options.defaultTranscriptionProvider ?? configuredProvider
     });
 
   const templateService =
@@ -240,7 +247,10 @@ export function createApp(options: AppOptions = {}): Hono {
 
     const autoTranscribe =
       autoTranscribeParam === "true" || autoTranscribeParam === "1";
-    const transcriptionProvider = providerParam === "local" ? "local" : "speechmatics";
+    let transcriptionProvider: "speechmatics" | "local" = loadAppConfig(appConfigPaths).transcriptionProvider;
+    if (providerParam === "local" || providerParam === "speechmatics") {
+      transcriptionProvider = providerParam;
+    }
     const modelId = typeof modelIdParam === "string" && modelIdParam.trim() ? modelIdParam.trim() : undefined;
 
     try {
@@ -383,7 +393,7 @@ export function createApp(options: AppOptions = {}): Hono {
       let modelId = body.modelId;
 
       try {
-        const cfg = loadAppConfig(paths);
+        const cfg = loadAppConfig(appConfigPaths);
         if (similarityThreshold === undefined) similarityThreshold = cfg.localSimilarityThreshold;
         if (clusteringThreshold === undefined) clusteringThreshold = cfg.localClusteringThreshold;
         if (modelId === undefined) modelId = cfg.localAsrModel;
@@ -442,6 +452,17 @@ export function createApp(options: AppOptions = {}): Hono {
                   stage: "cancelled",
                   percent: 0,
                   message: "Transcription was cancelled.",
+                  result
+                })
+              });
+            } else if (result.status === "error") {
+              await stream.writeSSE({
+                event: "error",
+                data: JSON.stringify({
+                  stage: "error",
+                  percent: 0,
+                  message: result.error || "Transcription failed",
+                  error: result.error || "Transcription failed",
                   result
                 })
               });
@@ -1114,7 +1135,7 @@ export function createApp(options: AppOptions = {}): Hono {
 
   app.get("/api/config", (c) => {
     try {
-      const config = loadAppConfig(paths);
+      const config = loadAppConfig(appConfigPaths);
       return c.json(config);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
@@ -1124,9 +1145,11 @@ export function createApp(options: AppOptions = {}): Hono {
   app.post("/api/config", async (c) => {
     try {
       const body = await c.req.json();
-      const current = loadAppConfig(paths);
+      const current = loadAppConfig(appConfigPaths);
       const merged = { ...current, ...(body as object) };
-      const updated = saveAppConfig(merged, paths);
+      const updated = saveAppConfig(merged, appConfigPaths);
+      transcriptionService.setDefaultProvider(updated.transcriptionProvider);
+      ingestService.setDefaultTranscriptionProvider(updated.transcriptionProvider);
       return c.json({ status: "updated", config: updated });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);

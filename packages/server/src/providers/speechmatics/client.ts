@@ -17,6 +17,7 @@ export interface SpeechmaticsClientOptions {
   apiUrl?: string;
   appId?: string;
   batchClient?: BatchClient;
+  submitTimeoutMs?: number;
 }
 
 export interface SubmitJobOptions {
@@ -37,15 +38,18 @@ export interface SubmitJobResult {
 }
 
 export class SpeechmaticsClient {
+  private static readonly DEFAULT_SUBMIT_TIMEOUT_MS = 30_000;
   private readonly apiKey: string;
   private readonly apiUrl?: string;
   private readonly appId: string;
   private readonly client: BatchClient;
+  private readonly submitTimeoutMs: number;
 
   constructor(options: SpeechmaticsClientOptions = {}) {
-    this.apiKey = options.apiKey || process.env.SPEECHMATICS_API_KEY || "";
+    this.apiKey = options.apiKey !== undefined ? options.apiKey : process.env.SPEECHMATICS_API_KEY ?? "";
     this.apiUrl = options.apiUrl;
     this.appId = options.appId || "olive-meeting-pipeline";
+    this.submitTimeoutMs = options.submitTimeoutMs ?? SpeechmaticsClient.DEFAULT_SUBMIT_TIMEOUT_MS;
 
     this.client =
       options.batchClient ??
@@ -65,7 +69,7 @@ export class SpeechmaticsClient {
   }
 
   async submitJob(options: SubmitJobOptions): Promise<SubmitJobResult> {
-    if (!this.apiKey && !this.client) {
+    if (!this.isConfigured) {
       throw new Error("Speechmatics API key is not configured");
     }
 
@@ -142,10 +146,22 @@ export class SpeechmaticsClient {
       throw new Error("No audio provided for transcription job");
     }
 
-    const response = await this.client.createTranscriptionJob(input, jobConfig);
-    return {
-      id: response.id
-    };
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await Promise.race([
+        this.client.createTranscriptionJob(input, jobConfig),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(new Error(`Speechmatics upload timed out after ${this.submitTimeoutMs}ms`));
+          }, this.submitTimeoutMs);
+        })
+      ]);
+      return {
+        id: response.id
+      };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   async getJob(jobId: string): Promise<SpeechmaticsJobStatus> {

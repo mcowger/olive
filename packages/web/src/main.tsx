@@ -868,7 +868,9 @@ function MeetingDetailView({
         const cfg = await cfgRes.json();
         if (cfg.localClusteringThreshold !== undefined) setCustomClusteringThreshold(cfg.localClusteringThreshold);
         if (cfg.localSimilarityThreshold !== undefined) setCustomSimilarityThreshold(cfg.localSimilarityThreshold);
-        if (cfg.localAsrModel?.includes("qwen")) {
+        if (cfg.transcriptionProvider === "speechmatics") {
+          setSelectedEngine("speechmatics");
+        } else if (cfg.localAsrModel?.includes("qwen")) {
           setSelectedEngine("local:qwen");
         } else {
           setSelectedEngine("local:cohere");
@@ -1056,6 +1058,7 @@ function MeetingDetailView({
                     setTranscribing(false);
                   } else if (event === "error") {
                     setError(data.error || data.message || "Transcription failed");
+                    setTranscribing(false);
                   }
                 } catch {
                   // ignore partial JSON
@@ -1339,6 +1342,8 @@ function MeetingDetailView({
                     ? transcriptionProgress
                       ? transcriptionProgress.stage === "diarizing"
                         ? `Diarizing (${transcriptionProgress.percent || 15}%)…`
+                        : transcriptionProgress.stage === "uploading"
+                        ? `Uploading (${transcriptionProgress.percent || 15}%)…`
                         : transcriptionProgress.stage === "decoding"
                         ? "Enhancing Audio…"
                         : `Transcribing (${transcriptionProgress.percent || 25}%)…`
@@ -2613,6 +2618,19 @@ function UploadAudioModal({
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    void fetch("/api/config")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((config) => {
+        if (config?.transcriptionProvider === "speechmatics") {
+          setSelectedEngine("speechmatics");
+        } else if (config?.localAsrModel?.includes("qwen")) {
+          setSelectedEngine("local:qwen");
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const selected = e.target.files[0];
@@ -3506,6 +3524,7 @@ function LlmSettingsModal({
   const [localClusteringThreshold, setLocalClusteringThreshold] = useState<number>(0.85);
   const [localSimilarityThreshold, setLocalSimilarityThreshold] = useState<number>(0.85);
   const [localAsrModel, setLocalAsrModel] = useState<string>("onnx-community/cohere-transcribe-03-2026-ONNX");
+  const [transcriptionProvider, setTranscriptionProvider] = useState<"speechmatics" | "local">("local");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshingCatalog, setRefreshingCatalog] = useState(false);
@@ -3546,6 +3565,9 @@ function LlmSettingsModal({
         }
         if (appCfg.localAsrModel !== undefined) {
           setLocalAsrModel(appCfg.localAsrModel);
+        }
+        if (appCfg.transcriptionProvider === "speechmatics" || appCfg.transcriptionProvider === "local") {
+          setTranscriptionProvider(appCfg.transcriptionProvider);
         }
       }
 
@@ -3677,7 +3699,8 @@ function LlmSettingsModal({
           body: JSON.stringify({
             localClusteringThreshold,
             localSimilarityThreshold,
-            localAsrModel
+            localAsrModel,
+            transcriptionProvider
           })
         })
       ]);
@@ -3915,6 +3938,23 @@ function LlmSettingsModal({
                   </p>
                 </div>
               </div>
+            </div>
+
+            <div className="rounded-xl border border-stone-800 bg-stone-950/60 p-4 space-y-2">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-stone-300">
+                Automatic Transcription Engine
+              </label>
+              <select
+                value={transcriptionProvider}
+                onChange={(e) => setTranscriptionProvider(e.target.value as "speechmatics" | "local")}
+                className="w-full rounded-lg border border-stone-700 bg-stone-900 px-3 py-2 text-sm text-stone-100 focus:border-lime-400 focus:outline-none"
+              >
+                <option value="local">Local (Cohere/Qwen + diarization)</option>
+                <option value="speechmatics">Speechmatics Cloud</option>
+              </select>
+              <p className="text-[11px] text-stone-500">
+                Controls the default for new uploads and manual transcription. Speechmatics requires SPEECHMATICS_API_KEY.
+              </p>
             </div>
 
             {testResult && (
@@ -4673,4 +4713,3 @@ createRoot(document.getElementById("root")!).render(
     <App />
   </StrictMode>
 );
-

@@ -3,9 +3,19 @@ import { createRoot } from "react-dom/client";
 import type { ReactElement } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import {
+  AssistantRuntimeProvider,
+  ComposerPrimitive,
+  MessagePrimitive,
+  ThreadPrimitive,
+  useLocalRuntime,
+  type ChatModelAdapter,
+  type ThreadMessageLike
+} from "@assistant-ui/react";
 import type {
   Artifact,
   BackupInfo,
+  ChatMessage,
   LlmModelCatalogItem,
   LlmProviderSummary,
   LogItem,
@@ -92,6 +102,177 @@ function MarkdownRenderer({ content, className = "" }: { content: string; classN
       className={`prose prose-invert prose-stone max-w-none text-stone-200 prose-headings:font-semibold prose-headings:tracking-tight prose-headings:text-stone-100 prose-h1:text-xl prose-h1:border-b prose-h1:border-stone-800 prose-h1:pb-2 prose-h2:text-lg prose-h2:border-b prose-h2:border-stone-800/60 prose-h2:pb-1.5 prose-h3:text-base prose-h4:text-sm prose-p:leading-relaxed prose-p:my-3 prose-ul:my-2 prose-ul:list-disc prose-ol:my-2 prose-ol:list-decimal prose-li:my-1 prose-a:text-lime-400 hover:prose-a:text-lime-300 prose-strong:text-stone-100 prose-blockquote:border-l-2 prose-blockquote:border-lime-400/40 prose-blockquote:bg-stone-900/60 prose-blockquote:py-1 prose-blockquote:px-4 prose-blockquote:rounded-r prose-blockquote:text-stone-300 prose-blockquote:not-italic prose-code:text-lime-300 prose-code:bg-stone-800/90 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:font-mono prose-code:text-xs prose-code:before:content-none prose-code:after:content-none prose-pre:bg-stone-950 prose-pre:border prose-pre:border-stone-800 prose-pre:rounded-xl prose-table:my-4 prose-table:w-full prose-table:text-left prose-th:border-b prose-th:border-stone-700 prose-th:py-2 prose-th:px-3 prose-th:text-stone-300 prose-th:font-semibold prose-td:border-b prose-td:border-stone-800 prose-td:py-2 prose-td:px-3 prose-hr:border-stone-800 ${className}`}
       dangerouslySetInnerHTML={{ __html: renderedHtml }}
     />
+  );
+}
+
+function chatMessageContent(message: ChatMessage): ThreadMessageLike {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    createdAt: new Date(message.createdAt)
+  };
+}
+
+function chatTextFromMessage(message: { content: unknown }): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .filter((part): part is { type: "text"; text: string } =>
+      typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string"
+    )
+    .map((part) => part.text)
+    .join("");
+}
+
+function parseChatStreamBlock(block: string): { event: string; data: string } | null {
+  let event = "message";
+  let data = "";
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  return data ? { event, data } : null;
+}
+
+function MeetingChatPanel({ meetingId, meetingTitle, onClose }: { meetingId: string; meetingTitle: string; onClose: () => void }): ReactElement {
+  const [initialMessages, setInitialMessages] = useState<readonly ThreadMessageLike[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    void fetch(`/api/meetings/${meetingId}/chat/messages`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `HTTP ${response.status}`);
+        return response.json() as Promise<{ messages: ChatMessage[] }>;
+      })
+      .then((data) => {
+        if (!cancelled) setInitialMessages(data.messages.map(chatMessageContent));
+      })
+      .catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingId]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={`Chat with ${meetingTitle}`}>
+      <button type="button" aria-label="Close chat" onClick={onClose} className="absolute inset-0 cursor-default bg-black/60" />
+      <aside className="relative flex h-full w-full max-w-xl flex-col border-l border-stone-800 bg-stone-950 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-stone-800 bg-stone-900/95 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wider text-lime-400">Chat with Meeting</p>
+            <h2 className="truncate text-sm font-medium text-stone-200">{meetingTitle}</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (!confirm("Clear this meeting's chat history?")) return;
+                void fetch(`/api/meetings/${meetingId}/chat/messages`, { method: "DELETE" }).then((response) => {
+                  if (!response.ok) throw new Error("Failed to clear chat history");
+                  onClose();
+                }).catch((error) => alert(error instanceof Error ? error.message : String(error)));
+              }}
+              className="rounded-lg px-2.5 py-1.5 text-xs text-stone-400 hover:bg-stone-800 hover:text-stone-200"
+            >
+              Clear
+            </button>
+            <button type="button" onClick={onClose} className="rounded-lg px-2.5 py-1.5 text-lg leading-none text-stone-400 hover:bg-stone-800 hover:text-white" aria-label="Close chat">×</button>
+          </div>
+        </div>
+
+        {loading ? <div className="flex flex-1 items-center justify-center text-sm text-stone-500">Loading conversation…</div> : loadError ? <div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{loadError}</div> : initialMessages ? (
+          <MeetingChatRuntime
+            meetingId={meetingId}
+            initialMessages={initialMessages}
+          />
+        ) : null}
+      </aside>
+    </div>
+  );
+}
+
+function MeetingChatRuntime({ meetingId, initialMessages }: { meetingId: string; initialMessages: readonly ThreadMessageLike[] }): ReactElement {
+  const adapter: ChatModelAdapter = useMemo(() => ({
+    async *run({ messages, abortSignal }) {
+      const latest = messages[messages.length - 1];
+      const content = latest ? chatTextFromMessage(latest) : "";
+      const response = await fetch(`/api/meetings/${meetingId}/chat/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "text/event-stream" },
+        body: JSON.stringify({ content }),
+        signal: abortSignal
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(error.error || `HTTP ${response.status}`);
+      }
+      if (!response.body) throw new Error("Chat response did not include a stream");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let fullText = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          const parsed = parseChatStreamBlock(block);
+          if (!parsed) continue;
+          const data = JSON.parse(parsed.data) as { delta?: string; error?: string };
+          if (parsed.event === "error") throw new Error(data.error || "Chat request failed");
+          if (parsed.event === "delta" && data.delta) {
+            fullText += data.delta;
+            yield { content: [{ type: "text", text: fullText }] };
+          }
+        }
+      }
+    }
+  }), [meetingId]);
+
+  const runtime = useLocalRuntime(adapter, { initialMessages });
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
+        <ThreadPrimitive.Viewport autoScroll className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <ThreadPrimitive.Messages components={{
+            UserMessage: () => (
+              <MessagePrimitive.Root className="mb-4 flex justify-end">
+                <div className="max-w-[85%] rounded-2xl rounded-br-md bg-lime-400 px-3.5 py-2.5 text-sm text-stone-950">
+                  <MessagePrimitive.Content />
+                </div>
+              </MessagePrimitive.Root>
+            ),
+            AssistantMessage: () => (
+              <MessagePrimitive.Root className="mb-4 flex justify-start">
+                <div className="max-w-[90%] rounded-2xl rounded-bl-md border border-stone-800 bg-stone-900 px-3.5 py-2.5 text-sm text-stone-200 prose prose-invert prose-sm max-w-none">
+                  <MessagePrimitive.Content />
+                </div>
+              </MessagePrimitive.Root>
+            )
+          }} />
+        </ThreadPrimitive.Viewport>
+        <ComposerPrimitive.Root className="border-t border-stone-800 bg-stone-900/80 p-3">
+          <ComposerPrimitive.Input placeholder="Ask about this meeting…" className="min-h-20 w-full resize-none rounded-xl border border-stone-700 bg-stone-950 px-3 py-2 text-sm text-stone-100 outline-none placeholder:text-stone-500 focus:border-lime-400" />
+          <div className="mt-2 flex justify-end">
+            <ComposerPrimitive.Send className="rounded-lg bg-lime-400 px-3 py-1.5 text-xs font-semibold text-stone-950 hover:bg-lime-300 disabled:cursor-not-allowed disabled:opacity-40">Send</ComposerPrimitive.Send>
+          </div>
+        </ComposerPrimitive.Root>
+      </ThreadPrimitive.Root>
+    </AssistantRuntimeProvider>
   );
 }
 
@@ -834,6 +1015,7 @@ function MeetingDetailView({
   const [reassigningSpeaker, setReassigningSpeaker] = useState<{ speaker: string; segmentIndex?: number } | null>(null);
   const [splittingSegment, setSplittingSegment] = useState<{ segmentIndex: number; speaker: string; text: string; startMs: number; endMs: number } | null>(null);
   const [showSummaryModal, setShowSummaryModal] = useState(false);
+  const [showChatPanel, setShowChatPanel] = useState(false);
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
   const [summaryViewMode, setSummaryViewMode] = useState<"rendered" | "raw">("rendered");
   const [regenerating, setRegenerating] = useState(false);
@@ -1349,6 +1531,14 @@ function MeetingDetailView({
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              <button
+                type="button"
+                onClick={() => setShowChatPanel(true)}
+                className="inline-flex items-center gap-2 rounded-lg border border-cyan-400/40 bg-cyan-400/10 px-3.5 py-2 text-sm font-semibold text-cyan-300 transition hover:border-cyan-300/60 hover:bg-cyan-400/20 shadow-md shrink-0"
+              >
+                <span>✦</span>
+                <span>Chat with Meeting</span>
+              </button>
               <select
                 value={selectedEngine}
                 onChange={(e) => setSelectedEngine(e.target.value)}
@@ -1964,6 +2154,14 @@ function MeetingDetailView({
                 setShowSummaryModal(false);
                 setSummaryGeneration(status);
               }}
+            />
+          )}
+
+          {showChatPanel && (
+            <MeetingChatPanel
+              meetingId={meetingId}
+              meetingTitle={detail.meeting.title}
+              onClose={() => setShowChatPanel(false)}
             />
           )}
 

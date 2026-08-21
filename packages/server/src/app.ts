@@ -19,6 +19,7 @@ import { IngestService } from "./ingest/service.ts";
 import { TemplateService } from "./templates/service.ts";
 import { LlmService } from "./llm/service.ts";
 import { SummaryService } from "./summaries/service.ts";
+import { ChatService } from "./chat/service.ts";
 import { BackupService } from "./backup/service.ts";
 import { meetingPaths } from "./layout.ts";
 import { enhanceAudioFile } from "./providers/local/wav.ts";
@@ -43,6 +44,7 @@ export interface AppOptions {
   templateService?: TemplateService;
   llmService?: LlmService;
   summaryService?: SummaryService;
+  chatService?: ChatService;
   backupService?: BackupService;
   speechmaticsWebhookSecret?: string;
   ingestToken?: string;
@@ -153,6 +155,14 @@ export function createApp(options: AppOptions = {}): Hono {
       meetingsDir,
       llmService,
       templateService
+    });
+
+  const chatService =
+    options.chatService ??
+    new ChatService({
+      db,
+      meetingsDir,
+      llmService
     });
 
   transcriptionService.setSummaryService(summaryService);
@@ -282,6 +292,62 @@ export function createApp(options: AppOptions = {}): Hono {
       ...detail,
       transcriptionProgress: activeProgress,
       summaryGeneration: summaryService.getSummaryGenerationStatus(meetingId)
+    });
+  });
+
+  app.get("/api/meetings/:id/chat/messages", async (c) => {
+    try {
+      return c.json({ messages: await chatService.getMessages(c.req.param("id")) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({ error: message }, message.startsWith("Meeting not found") ? 404 : 400);
+    }
+  });
+
+  app.delete("/api/meetings/:id/chat/messages", async (c) => {
+    try {
+      await chatService.clearMessages(c.req.param("id"));
+      return c.json({ status: "cleared" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({ error: message }, message.startsWith("Meeting not found") ? 404 : 400);
+    }
+  });
+
+  app.post("/api/meetings/:id/chat/messages", async (c) => {
+    let body: { content?: string };
+    try {
+      body = (await c.req.json()) as { content?: string };
+    } catch {
+      return c.json({ error: "JSON body required" }, 400);
+    }
+
+    if (!body.content?.trim()) {
+      return c.json({ error: "Message content is required" }, 400);
+    }
+
+    return streamSSE(c, async (stream) => {
+      try {
+        const assistantMessage = await chatService.streamMessage({
+          meetingId: c.req.param("id"),
+          content: body.content!,
+          onDelta: async (delta) => {
+            await stream.writeSSE({
+              event: "delta",
+              data: JSON.stringify({ delta })
+            });
+          }
+        });
+        await stream.writeSSE({
+          event: "done",
+          data: JSON.stringify({ message: assistantMessage })
+        });
+      } catch (error) {
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify({ error: error instanceof Error ? error.message : String(error) })
+        });
+      }
     });
   });
 

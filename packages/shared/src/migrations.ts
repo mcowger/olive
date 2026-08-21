@@ -94,6 +94,16 @@ const CREATE_TABLE_STATEMENTS = [
     meeting_id TEXT REFERENCES meetings(id),
     details TEXT,
     created_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    meeting_id TEXT NOT NULL REFERENCES meetings(id),
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    usage TEXT,
+    created_at INTEGER NOT NULL
   )`
 ];
 
@@ -107,7 +117,8 @@ const CREATE_INDEX_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)",
   "CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category)",
-  "CREATE INDEX IF NOT EXISTS idx_logs_meeting_id ON logs(meeting_id)"
+  "CREATE INDEX IF NOT EXISTS idx_logs_meeting_id ON logs(meeting_id)",
+  "CREATE INDEX IF NOT EXISTS idx_chat_messages_meeting_created ON chat_messages(meeting_id, created_at)"
 ];
 
 const ADDITIVE_COLUMNS = [

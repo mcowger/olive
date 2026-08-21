@@ -110,6 +110,19 @@ export interface LogTable {
   created_at: number;
 }
 
+export type ChatMessageRole = "user" | "assistant";
+
+export interface ChatMessageTable {
+  id: string;
+  meeting_id: string;
+  role: ChatMessageRole;
+  content: string;
+  provider: string | null;
+  model: string | null;
+  usage: string | null;
+  created_at: number;
+}
+
 export interface Database {
   meetings: MeetingTable;
   recordings: RecordingTable;
@@ -121,6 +134,7 @@ export interface Database {
   sync_state: SyncStateTable;
   templates: TemplateTable;
   logs: LogTable;
+  chat_messages: ChatMessageTable;
 }
 
 export type MeetingRow = Selectable<MeetingTable>;
@@ -145,6 +159,24 @@ export type NewTemplate = Insertable<TemplateTable>;
 export type TemplateUpdate = Updateable<TemplateTable>;
 export type LogRow = Selectable<LogTable>;
 export type NewLog = Insertable<LogTable>;
+export type ChatMessageRow = Selectable<ChatMessageTable>;
+export type NewChatMessage = Insertable<ChatMessageTable>;
+
+export interface ChatMessage {
+  id: string;
+  meetingId: string;
+  role: ChatMessageRole;
+  content: string;
+  provider: string | null;
+  model: string | null;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cost?: number;
+  } | null;
+  createdAt: number;
+}
 
 export interface Template {
   id: string;
@@ -372,6 +404,11 @@ export interface LlmGenerateOptions {
   model?: string;
   systemPrompt?: string;
   prompt: string;
+  messages?: Array<{
+    role: "user" | "assistant";
+    content: string;
+    timestamp?: number;
+  }>;
   temperature?: number;
   maxTokens?: number;
   thinkingLevel?: LlmThinkingLevel;
@@ -485,4 +522,3 @@ export interface LogListResponse {
   };
   categories: string[];
 }
-

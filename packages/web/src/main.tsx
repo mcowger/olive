@@ -512,6 +512,7 @@ export function App(): ReactElement {
             meetingId={selectedMeetingId}
             knownSpeakers={knownSpeakers}
             onBack={() => navigate("/meetings")}
+            onDeleted={() => navigate("/meetings")}
             onSpeakerUpdated={() => void refreshSpeakers()}
           />
         ) : activeTab === "meetings" ? (
@@ -850,6 +851,19 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
     void fetchMeetings();
   }, [search]);
 
+  const handleDeleteMeeting = async (id: string, title: string) => {
+    if (!confirm(`Are you sure you want to delete meeting "${title}"? This will permanently remove its recordings, transcripts, and summaries.`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/meetings/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete meeting");
+      await fetchMeetings();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   // Poll active transcriptions every 2.5s if any meeting is processing
   useEffect(() => {
     const hasProcessing = meetings.some((m) => m.status === "processing") || Object.keys(activeProgressMap).length > 0;
@@ -954,6 +968,20 @@ function MeetingsListView({ onSelectMeeting }: { onSelectMeeting: (id: string) =
                       Transcript
                     </span>
                   )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDeleteMeeting(meeting.id, meeting.title);
+                    }}
+                    className="rounded-full border border-stone-700 p-1.5 text-stone-500 transition hover:border-rose-500/60 hover:text-rose-300"
+                    title="Delete meeting"
+                  >
+                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6"></polyline>
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                  </button>
                 </div>
               </div>
 
@@ -993,11 +1021,13 @@ function MeetingDetailView({
   meetingId,
   knownSpeakers,
   onBack,
+  onDeleted,
   onSpeakerUpdated
 }: {
   meetingId: string;
   knownSpeakers: SpeakerWithStats[];
   onBack: () => void;
+  onDeleted: () => void;
   onSpeakerUpdated: () => void;
 }): ReactElement {
   const [detail, setDetail] = useState<MeetingDetailResponse | null>(null);
@@ -1346,6 +1376,24 @@ function MeetingDetailView({
     }
   };
 
+  const handleDeleteMeeting = async () => {
+    if (!detail) return;
+    if (
+      !confirm(
+        `Are you sure you want to delete meeting "${detail.meeting.title}"? This will permanently remove its recordings, transcripts, and summaries.`
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete meeting");
+      onDeleted();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleDeleteSummary = async (artifactId: string) => {
     if (!confirm("Are you sure you want to delete this summary?")) {
       return;
@@ -1606,6 +1654,19 @@ function MeetingDetailView({
                   <span>{cancellingTranscription ? "Cancelling…" : "Cancel"}</span>
                 </button>
               )}
+
+              <button
+                type="button"
+                onClick={() => void handleDeleteMeeting()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/20 hover:border-rose-500/60 shadow-md shrink-0"
+                title="Delete this meeting and all its artifacts"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"></polyline>
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+                <span>Delete</span>
+              </button>
             </div>
           </header>
 

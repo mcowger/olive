@@ -8,7 +8,7 @@ import { logger } from "./logger.ts";
 import { loadAppConfig, saveAppConfig } from "./config.ts";
 import { getDb } from "./db.ts";
 import { resolvePaths } from "./paths.ts";
-import { getMeeting, listMeetings } from "./meetings.ts";
+import { deleteMeeting, getMeeting, listMeetings } from "./meetings.ts";
 import { createPlaudClient } from "./plaud/client.ts";
 import { PlaudAuthSessionStore } from "./plaud/auth.ts";
 import { PlaudPoller, type PlaudClientLike, type PlaudOAuthManager } from "./plaud/poller.ts";
@@ -329,6 +329,24 @@ export function createApp(options: AppOptions = {}): Hono {
       transcriptionProgress: activeProgress,
       summaryGeneration: summaryService.getSummaryGenerationStatus(meetingId)
     });
+  });
+
+  app.delete("/api/meetings/:id", async (c) => {
+    const meetingId = c.req.param("id");
+    try {
+      await transcriptionService.cancelTranscription(meetingId);
+    } catch {
+      // no in-flight transcription to cancel
+    }
+    try {
+      const deleted = await deleteMeeting(db, meetingId, meetingsDir);
+      if (!deleted) {
+        return c.json({ error: "Meeting not found" }, 404);
+      }
+      return c.json({ status: "deleted" });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
   });
 
   app.get("/api/meetings/:id/chat/messages", async (c) => {

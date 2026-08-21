@@ -4,10 +4,13 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type {
+  ArtifactRow,
   Database,
   LlmThinkingLevel,
   MeetingDetailAggregate,
+  MeetingRow,
   MeetingSummaryItem,
+  SummaryGenerationStatus,
   Template,
   Transcript
 } from "@olive/shared";
@@ -50,11 +53,14 @@ export interface GenerateSummaryResult {
   };
 }
 
+const SUMMARY_STATUS_TTL_MS = 5 * 60 * 1000;
+
 export class SummaryService {
   private readonly db: Kysely<Database>;
   private readonly meetingsDir: string;
   private readonly llmService: LlmService;
   private readonly templateService: TemplateService;
+  private readonly generationStatuses = new Map<string, SummaryGenerationStatus>();
 
   constructor(options: SummaryServiceOptions = {}) {
     this.db = options.db ?? getDb();
@@ -63,24 +69,88 @@ export class SummaryService {
     this.templateService = options.templateService ?? new TemplateService(this.db);
   }
 
-  async generateSummary(options: GenerateSummaryOptions): Promise<GenerateSummaryResult> {
+  getSummaryGenerationStatus(meetingId: string): SummaryGenerationStatus | null {
+    const status = this.generationStatuses.get(meetingId);
+    return status ? { ...status } : null;
+  }
+
+  async startSummaryGeneration(options: GenerateSummaryOptions): Promise<SummaryGenerationStatus> {
+    const existing = this.generationStatuses.get(options.meetingId);
+    if (existing?.stage === "running") {
+      throw new Error("Summary generation is already in progress for this meeting");
+    }
+
+    // Validate up front so failures (missing transcript, etc.) surface to the caller
+    await this.loadMeetingWithTranscript(options.meetingId);
+
+    const status: SummaryGenerationStatus = {
+      meetingId: options.meetingId,
+      stage: "running",
+      startedAt: Date.now(),
+      provider: options.provider,
+      model: options.model
+    };
+    this.generationStatuses.set(options.meetingId, status);
+
+    void this.generateSummary(options)
+      .then((result) => {
+        this.generationStatuses.set(options.meetingId, {
+          ...status,
+          stage: "done",
+          provider: result.provider,
+          model: result.model,
+          templateName: result.templateName,
+          artifactId: result.artifactId
+        });
+        this.pruneStatusLater(options.meetingId);
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn("Background summary generation failed", {
+          category: "summary",
+          meetingId: options.meetingId,
+          error: message
+        });
+        this.generationStatuses.set(options.meetingId, {
+          ...status,
+          stage: "error",
+          error: message
+        });
+        this.pruneStatusLater(options.meetingId);
+      });
+
+    return { ...status };
+  }
+
+  private pruneStatusLater(meetingId: string): void {
+    const timer = setTimeout(() => {
+      const current = this.generationStatuses.get(meetingId);
+      if (current && current.stage !== "running") {
+        this.generationStatuses.delete(meetingId);
+      }
+    }, SUMMARY_STATUS_TTL_MS);
+    timer.unref?.();
+  }
+
+  private async loadMeetingWithTranscript(
+    meetingId: string
+  ): Promise<{ meeting: MeetingRow; folder: string; transcriptArtifact: ArtifactRow }> {
     const meeting = await this.db
       .selectFrom("meetings")
       .selectAll()
-      .where("id", "=", options.meetingId)
+      .where("id", "=", meetingId)
       .executeTakeFirst();
 
     if (!meeting) {
-      throw new Error(`Meeting not found: ${options.meetingId}`);
+      throw new Error(`Meeting not found: ${meetingId}`);
     }
 
     const folder = meetingPaths(this.meetingsDir, meeting.start_time, meeting.title, meeting.id).folder;
 
-    // 1. Locate transcript artifact
     const artifacts = await this.db
       .selectFrom("artifacts")
       .selectAll()
-      .where("meeting_id", "=", options.meetingId)
+      .where("meeting_id", "=", meetingId)
       .execute();
 
     let transcriptArtifact = artifacts.find((a) => a.id === meeting.primary_transcript_artifact_id);
@@ -97,6 +167,13 @@ export class SummaryService {
       throw new Error(`Transcript artifact not found on disk at: ${transcriptArtifact.path}`);
     }
 
+    return { meeting, folder, transcriptArtifact };
+  }
+
+  async generateSummary(options: GenerateSummaryOptions): Promise<GenerateSummaryResult> {
+    const { meeting, folder, transcriptArtifact } = await this.loadMeetingWithTranscript(options.meetingId);
+
+    const transcriptFullPath = join(folder, transcriptArtifact.path);
     const rawTranscript = await readFile(transcriptFullPath, "utf8");
     let formattedDialogue: string;
 

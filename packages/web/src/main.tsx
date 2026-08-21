@@ -18,6 +18,7 @@ import type {
   RestoreResult,
   Speaker,
   StageRunRow,
+  SummaryGenerationStatus,
   Template,
   TranscriptionProgressUpdate
 } from "@olive/shared";
@@ -836,6 +837,7 @@ function MeetingDetailView({
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
   const [summaryViewMode, setSummaryViewMode] = useState<"rendered" | "raw">("rendered");
   const [regenerating, setRegenerating] = useState(false);
+  const [summaryGeneration, setSummaryGeneration] = useState<SummaryGenerationStatus | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmationNotice, setConfirmationNotice] = useState<string | null>(null);
   const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
@@ -852,6 +854,9 @@ function MeetingDetailView({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as MeetingDetailResponse;
       setDetail(data);
+      if (data.summaryGeneration?.stage === "running") {
+        setSummaryGeneration(data.summaryGeneration);
+      }
       if (data.transcriptionProgress) {
         setTranscriptionProgress(data.transcriptionProgress);
         setTranscribing(true);
@@ -946,6 +951,50 @@ function MeetingDetailView({
       }
     };
   }, [meetingId]);
+
+  const summaryGenerating = summaryGeneration?.stage === "running";
+
+  useEffect(() => {
+    if (!summaryGenerating) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/meetings/${meetingId}/summarize/status`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { generating: boolean; status: SummaryGenerationStatus | null };
+        if (cancelled) return;
+
+        if (!data.status) {
+          // Lost track of the job (e.g. server restart) — stop waiting
+          setSummaryGeneration(null);
+          return;
+        }
+        if (data.status.stage === "running") return;
+
+        if (data.status.stage === "done") {
+          setSummaryGeneration(null);
+          if (data.status.artifactId) {
+            setSelectedSummaryId(data.status.artifactId);
+          }
+          await fetchDetail();
+        } else {
+          setSummaryGeneration(data.status);
+          setTimeout(() => {
+            if (!cancelled) setSummaryGeneration(null);
+          }, 8000);
+        }
+      } catch {
+        // transient network error — keep polling
+      }
+    };
+
+    const interval = setInterval(() => void poll(), 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [summaryGenerating, meetingId]);
 
   const handleCancelTranscription = async () => {
     setCancellingTranscription(true);
@@ -1611,12 +1660,52 @@ function MeetingDetailView({
               <button
                 type="button"
                 onClick={() => setShowSummaryModal(true)}
-                className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-3.5 py-1.5 text-xs font-semibold text-stone-950 hover:bg-lime-300 transition"
+                disabled={summaryGenerating}
+                className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-3.5 py-1.5 text-xs font-semibold text-stone-950 hover:bg-lime-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                title={summaryGenerating ? "Summary generation already in progress" : undefined}
               >
                 <span>+</span>
                 <span>Generate Summary</span>
               </button>
             </div>
+
+            {/* In-flight summary generation placeholder / error */}
+            {summaryGeneration?.stage === "error" ? (
+              <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300 animate-in fade-in duration-200">
+                <span className="font-semibold">Summary generation failed:</span> {summaryGeneration.error}
+              </div>
+            ) : summaryGenerating ? (
+              <div className="rounded-xl border border-lime-500/30 bg-stone-900/70 shadow-lg overflow-hidden animate-in fade-in duration-200">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-800 bg-stone-950/60 p-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <svg className="h-3.5 w-3.5 animate-spin text-lime-400" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                    <span className="font-semibold text-stone-200">
+                      Generating summary
+                      {summaryGeneration.provider && summaryGeneration.model
+                        ? ` with ${summaryGeneration.provider}:${summaryGeneration.model}`
+                        : summaryGeneration.provider
+                        ? ` with ${summaryGeneration.provider}`
+                        : ""}
+                      …
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-stone-500 font-mono">This can take a minute</span>
+                </div>
+                <div className="p-6 space-y-3">
+                  <div className="h-5 w-2/5 rounded bg-stone-800 animate-pulse" />
+                  <div className="h-3 w-full rounded bg-stone-800 animate-pulse" />
+                  <div className="h-3 w-11/12 rounded bg-stone-800 animate-pulse" />
+                  <div className="h-3 w-4/5 rounded bg-stone-800 animate-pulse" />
+                  <div className="pt-3 h-4 w-1/3 rounded bg-stone-800 animate-pulse" />
+                  <div className="h-3 w-full rounded bg-stone-800 animate-pulse" />
+                  <div className="h-3 w-5/6 rounded bg-stone-800 animate-pulse" />
+                  <div className="h-3 w-3/5 rounded bg-stone-800 animate-pulse" />
+                </div>
+              </div>
+            ) : null}
 
             {summaries.length > 0 ? (
               <div className="rounded-xl border border-stone-800 bg-stone-900/70 shadow-lg overflow-hidden">
@@ -1726,7 +1815,7 @@ function MeetingDetailView({
                   </div>
                 )}
               </div>
-            ) : (
+            ) : !summaryGenerating ? (
               <div className="rounded-xl border border-dashed border-stone-800 bg-stone-900/40 p-8 text-center space-y-3">
                 <p className="text-sm text-stone-400">
                   No summary generated yet. Create AI meeting notes using a custom or built-in template.
@@ -1740,7 +1829,7 @@ function MeetingDetailView({
                   <span>Generate Summary</span>
                 </button>
               </div>
-            )}
+            ) : null}
           </section>
 
           {/* Transcript Viewer */}
@@ -1871,10 +1960,9 @@ function MeetingDetailView({
             <GenerateSummaryModal
               meetingId={meetingId}
               onClose={() => setShowSummaryModal(false)}
-              onSuccess={async (newArtifactId) => {
+              onStarted={(status) => {
                 setShowSummaryModal(false);
-                setSelectedSummaryId(newArtifactId);
-                await fetchDetail();
+                setSummaryGeneration(status);
               }}
             />
           )}
@@ -1947,11 +2035,11 @@ function MeetingDetailView({
 function GenerateSummaryModal({
   meetingId,
   onClose,
-  onSuccess
+  onStarted
 }: {
   meetingId: string;
   onClose: () => void;
-  onSuccess: (artifactId: string) => void;
+  onStarted: (status: SummaryGenerationStatus) => void;
 }): ReactElement {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [models, setModels] = useState<LlmModelCatalogItem[]>([]);
@@ -1961,7 +2049,7 @@ function GenerateSummaryModal({
   const [thinkingLevel, setThinkingLevel] = useState<string>("low");
   const [setPrimary, setSetPrimary] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -2025,7 +2113,7 @@ function GenerateSummaryModal({
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
-    setGenerating(true);
+    setStarting(true);
     setError(null);
 
     try {
@@ -2046,10 +2134,10 @@ function GenerateSummaryModal({
         throw new Error(data.error || `HTTP ${res.status}`);
       }
 
-      onSuccess(data.artifactId);
+      onStarted(data.status);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setGenerating(false);
+      setStarting(false);
     }
   };
 
@@ -2170,17 +2258,17 @@ function GenerateSummaryModal({
               <button
                 type="button"
                 onClick={onClose}
-                disabled={generating}
+                disabled={starting}
                 className="rounded-lg border border-stone-700 px-4 py-2 text-xs font-medium text-stone-300 hover:bg-stone-800 transition"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                disabled={generating}
+                disabled={starting}
                 className="inline-flex items-center gap-2 rounded-lg bg-lime-400 px-4 py-2 text-xs font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-50"
               >
-                {generating ? "Generating Summary…" : "Generate Summary"}
+                {starting ? "Starting…" : "Generate Summary"}
               </button>
             </div>
           </form>

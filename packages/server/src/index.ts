@@ -19,6 +19,7 @@ const app = createApp({
   meetingsDir: runtimeConfig.paths.meetingsDir,
   pollIntervalMinutes: appConfig.pollIntervalMinutes,
   defaultTranscriptionProvider: appConfig.transcriptionProvider,
+  bindHost: runtimeConfig.bindHost,
   startPlaudPoller: import.meta.main
 });
 

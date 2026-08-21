@@ -23,6 +23,14 @@ import { ChatService } from "./chat/service.ts";
 import { BackupService } from "./backup/service.ts";
 import { meetingPaths } from "./layout.ts";
 import { enhanceAudioFile } from "./providers/local/wav.ts";
+import { createMcpServer } from "./mcp/tools.ts";
+import {
+  createMcpHandler,
+  hostHeaderValidationResponse,
+  localhostAllowedHostnames,
+  localhostAllowedOrigins,
+  originValidationResponse
+} from "@modelcontextprotocol/server";
 
 export interface AppOptions {
   db?: Kysely<Database>;
@@ -48,6 +56,8 @@ export interface AppOptions {
   backupService?: BackupService;
   speechmaticsWebhookSecret?: string;
   ingestToken?: string;
+  mcpToken?: string;
+  bindHost?: string;
   defaultTranscriptionProvider?: "speechmatics" | "local";
 }
 
@@ -67,6 +77,10 @@ function numericQueryParam(value: string | undefined): number | undefined {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
 }
 
 function safeWebPath(webRoot: string, requestPath: string): string | undefined {
@@ -127,6 +141,7 @@ export function createApp(options: AppOptions = {}): Hono {
     });
 
   const ingestToken = options.ingestToken || process.env.OLIVE_INGEST_TOKEN;
+  const mcpToken = options.mcpToken || process.env.OLIVE_MCP_TOKEN || options.ingestToken || process.env.OLIVE_INGEST_TOKEN;
 
   const ingestService =
     options.ingestService ??
@@ -187,6 +202,27 @@ export function createApp(options: AppOptions = {}): Hono {
     });
   const oauthManager = options.oauthManager ?? plaudPoller.oauth;
   const authSessions = options.authSessions ?? new PlaudAuthSessionStore();
+
+  const bindHost = options.bindHost || process.env.OLIVE_BIND_HOST || "127.0.0.1";
+  if (!mcpToken && !isLoopbackHost(bindHost)) {
+    throw new Error("OLIVE_MCP_TOKEN or OLIVE_INGEST_TOKEN is required when OLIVE_BIND_HOST is not loopback");
+  }
+  if (isLoopbackHost(bindHost)) {
+    app.use("/mcp", async (c, next) => {
+      const rejected =
+        hostHeaderValidationResponse(c.req.raw, localhostAllowedHostnames()) ??
+        originValidationResponse(c.req.raw, localhostAllowedOrigins());
+      if (rejected) return rejected;
+      return next();
+    });
+  }
+  const mcpHandler = createMcpHandler(() => createMcpServer({ db, meetingsDir, speakerService }));
+  app.all("/mcp", async (c) => {
+    if (mcpToken && c.req.header("authorization") !== `Bearer ${mcpToken}`) {
+      return c.json({ error: "Unauthorized" }, 401, { "WWW-Authenticate": "Bearer" });
+    }
+    return mcpHandler.fetch(c.req.raw);
+  });
 
   if (options.startPlaudPoller || options.syncOnStartup) {
     void speakerService.syncMeetingSpeakersAndTranscripts().then((res) => {

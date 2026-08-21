@@ -220,11 +220,33 @@ Olive stores dynamic settings in `<data>/config/settings.json`, and accepts envi
 | `OLIVE_MEETINGS_DIR` | `~/.config/olive/meetings` | Storage directory for raw audio files and artifacts |
 | `OLIVE_MODELS_DIR` | `~/.config/olive/models` | Storage path for local ONNX/GGUF models |
 | `OLIVE_INGEST_TOKEN` | *(optional)* | Bearer token required for `/api/ingest` (used by iOS Shortcut) |
+| `OLIVE_MCP_TOKEN` | *(optional)* | Bearer token for `/mcp`; falls back to `OLIVE_INGEST_TOKEN` and is required for non-loopback binds |
 | `PLAUD_TOKEN_PATH` | `~/.plaud/tokens.json` | Path to persistent OAuth credentials for Plaud Cloud |
 | `SPEECHMATICS_API_KEY` | *(optional)* | API key for Speechmatics cloud transcription & diarization |
 | `SPEECHMATICS_WEBHOOK_SECRET` | *(optional)* | Secret used to sign and verify Speechmatics webhook callbacks |
 
 The default transcription engine is configured in **LLM Provider & Model Settings → Automatic Transcription Engine**. Local transcription is the default; choose Speechmatics there only when `SPEECHMATICS_API_KEY` is configured.
+
+### MCP integration
+
+Olive exposes a read-only Model Context Protocol endpoint at `/mcp` on the main server port. It provides tools for listing meetings, retrieving meeting details, searching transcripts, extracting summary checklist items, and looking up speakers.
+
+Local loopback clients can connect without a token. Set `OLIVE_MCP_TOKEN` to protect the endpoint; it falls back to `OLIVE_INGEST_TOKEN`. A token is required when `OLIVE_BIND_HOST` is not a loopback address.
+
+Example client configuration:
+
+```json
+{
+  "mcpServers": {
+    "olive": {
+      "url": "http://127.0.0.1:4471/mcp",
+      "headers": {
+        "Authorization": "Bearer ${OLIVE_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
 
 ---
 

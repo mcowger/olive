@@ -25,6 +25,9 @@ export interface MeetingListQuery {
   limit: number;
   offset: number;
   search?: string;
+  source?: MeetingRow["source"];
+  startTime?: number;
+  endTime?: number;
 }
 
 export interface MeetingListResponse {
@@ -182,8 +185,20 @@ export async function listMeetings(
     return builder.where("id", "in", Array.from(matchingIds));
   };
 
-  const rowsQuery = applyFilters(db.selectFrom("meetings"));
-  const countQuery = applyFilters(db.selectFrom("meetings"));
+  let rowsQuery = applyFilters(db.selectFrom("meetings"));
+  let countQuery = applyFilters(db.selectFrom("meetings"));
+  if (query.source) {
+    rowsQuery = rowsQuery.where("source", "=", query.source);
+    countQuery = countQuery.where("source", "=", query.source);
+  }
+  if (query.startTime !== undefined) {
+    rowsQuery = rowsQuery.where("start_time", ">=", query.startTime);
+    countQuery = countQuery.where("start_time", ">=", query.startTime);
+  }
+  if (query.endTime !== undefined) {
+    rowsQuery = rowsQuery.where("start_time", "<=", query.endTime);
+    countQuery = countQuery.where("start_time", "<=", query.endTime);
+  }
   const [rows, totalRow] = await Promise.all([
     rowsQuery.selectAll().orderBy("start_time", "desc").limit(limit).offset(offset).execute(),
     countQuery.select(({ fn }) => fn.count<number>("id").as("count")).executeTakeFirstOrThrow()

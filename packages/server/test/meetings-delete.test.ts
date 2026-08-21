@@ -113,7 +113,7 @@ async function seedFullMeeting(db: Kysely<Database>, meetingsDir: string) {
       id: "stage-run-delete-1",
       meeting_id: meetingId,
       stage: "transcribe",
-      status: "completed",
+      status: "done",
       provider_job_id: null,
       attempts: 1,
       last_error: null,

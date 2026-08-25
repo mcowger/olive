@@ -1067,8 +1067,44 @@ function MeetingDetailView({
   const [playingSegmentIndex, setPlayingSegmentIndex] = useState<number | null>(null);
   const playbackStopMsRef = useRef<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleInput, setTitleInput] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [newTagInput, setNewTagInput] = useState("");
   const [savingTags, setSavingTags] = useState(false);
+
+  const startRename = () => {
+    if (!detail) return;
+    setTitleInput(detail.meeting.title);
+    setEditingTitle(true);
+    setError(null);
+  };
+
+  const saveTitle = async () => {
+    const title = titleInput.trim();
+    if (!title) {
+      setError("Meeting title cannot be empty");
+      return;
+    }
+
+    setSavingTitle(true);
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/title`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title })
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; meeting?: MeetingListItem };
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (!data.meeting) throw new Error("Meeting title update returned no meeting");
+      setDetail((prev) => (prev ? { ...prev, meeting: { ...prev.meeting, title: data.meeting!.title } } : prev));
+      setEditingTitle(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to rename meeting");
+    } finally {
+      setSavingTitle(false);
+    }
+  };
 
   const saveTags = async (nextTags: string[]) => {
     setSavingTags(true);
@@ -1618,7 +1654,56 @@ function MeetingDetailView({
         <div className="space-y-8">
           <header className="flex flex-col gap-4 border-b border-stone-800 pb-6 lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
-              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight break-words">{detail.meeting.title}</h1>
+              {editingTitle ? (
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void saveTitle();
+                  }}
+                  className="flex flex-wrap items-center gap-2"
+                >
+                  <input
+                    type="text"
+                    value={titleInput}
+                    onChange={(event) => setTitleInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setEditingTitle(false);
+                    }}
+                    aria-label="Meeting title"
+                    autoFocus
+                    disabled={savingTitle}
+                    className="min-w-0 flex-1 rounded-lg border border-lime-400/50 bg-stone-900 px-3 py-1.5 text-2xl font-bold tracking-tight text-stone-100 focus:border-lime-400 focus:outline-none sm:text-3xl"
+                  />
+                  <button
+                    type="submit"
+                    disabled={savingTitle}
+                    className="rounded-lg bg-lime-400 px-3 py-1.5 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-50"
+                  >
+                    {savingTitle ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingTitle(false)}
+                    disabled={savingTitle}
+                    className="rounded-lg border border-stone-700 px-3 py-1.5 text-sm text-stone-300 transition hover:border-stone-500 hover:text-stone-100 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </form>
+              ) : (
+                <div className="flex items-start gap-2">
+                  <h1 className="text-2xl sm:text-3xl font-bold tracking-tight break-words">{detail.meeting.title}</h1>
+                  <button
+                    type="button"
+                    onClick={startRename}
+                    className="mt-1 rounded-md px-1.5 py-1 text-stone-500 transition hover:bg-stone-800 hover:text-lime-300"
+                    aria-label="Rename meeting"
+                    title="Rename meeting"
+                  >
+                    ✎
+                  </button>
+                </div>
+              )}
               <div className="mt-2 flex flex-wrap items-center gap-2 sm:gap-3 text-xs sm:text-sm text-stone-400">
                 <span>{formatDate(detail.meeting.startTime)}</span>
                 <span>•</span>

@@ -136,6 +136,47 @@ describe("Plaud poller", () => {
     await rm(meetingsDir, { recursive: true, force: true });
   });
 
+  test("renaming a meeting preserves its files and Plaud import identity", async () => {
+    const handle = createDb(":memory:");
+    const meetingsDir = await mkdtemp(join(import.meta.dir, "plaud-rename-"));
+    const client = createFakeClient(readyDetail());
+    const poller = new PlaudPoller({ db: handle.db, meetingsDir, client, fetchImpl: fakeFetch(), now: () => 1_000_000 });
+    const app = createApp({ db: handle.db, meetingsDir, plaudPoller: poller });
+
+    await poller.trigger();
+    const before = await handle.db.selectFrom("meetings").selectAll().executeTakeFirstOrThrow();
+    const recordingBefore = await handle.db.selectFrom("recordings").selectAll().executeTakeFirstOrThrow();
+    const oldFolder = join(meetingsDir, dateFolder(before.start_time, before.title, before.id));
+
+    const renameResponse = await app.request(`http://olive.test/api/meetings/${before.id}/title`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Renamed planning" })
+    });
+    expect(renameResponse.status).toBe(200);
+    expect((await renameResponse.json()).meeting.title).toBe("Renamed planning");
+
+    const after = await handle.db.selectFrom("meetings").selectAll().executeTakeFirstOrThrow();
+    const newFolder = join(meetingsDir, dateFolder(after.start_time, after.title, after.id));
+    expect(after.id).toBe(before.id);
+    expect(existsSync(oldFolder)).toBe(false);
+    expect(existsSync(newFolder)).toBe(true);
+    expect(new Uint8Array(await readFile(join(newFolder, recordingBefore.path)))).toEqual(AUDIO_BYTES);
+
+    const second = await poller.trigger();
+    const recordingAfter = await handle.db.selectFrom("recordings").selectAll().executeTakeFirstOrThrow();
+    const state = await handle.db.selectFrom("plaud_ingest_state").selectAll().executeTakeFirstOrThrow();
+    expect(second.discovered).toBe(0);
+    expect(second.resolved).toBe(0);
+    expect(recordingAfter.id).toBe(recordingBefore.id);
+    expect(recordingAfter.provider_recording_id).toBe(FIXTURE_FILE.id);
+    expect(state.plaud_file_id).toBe(FIXTURE_FILE.id);
+    expect(await handle.db.selectFrom("meetings").selectAll().execute()).toHaveLength(1);
+
+    await closeDatabase(handle);
+    await rm(meetingsDir, { recursive: true, force: true });
+  });
+
   test("falls back to audio-only once the injected PCS deadline passes", async () => {
     const handle = createDb(":memory:");
     const meetingsDir = await mkdtemp(join(import.meta.dir, "plaud-fallback-"));

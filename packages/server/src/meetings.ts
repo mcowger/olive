@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Kysely } from "kysely";
 import type {
@@ -226,6 +226,62 @@ export async function updateMeetingTags(
     .set({ tags: JSON.stringify(normalized), updated_at: Date.now() })
     .where("id", "=", id)
     .execute();
+
+  const row = await db.selectFrom("meetings").selectAll().where("id", "=", id).executeTakeFirst();
+  return row ? toMeeting(row) : null;
+}
+
+export async function updateMeetingTitle(
+  db: Kysely<Database>,
+  id: string,
+  title: string,
+  meetingsDir?: string
+): Promise<MeetingListItem | null> {
+  const normalizedTitle = title.trim();
+  if (!normalizedTitle) {
+    throw new Error("title must be a non-empty string");
+  }
+
+  const meeting = await db.selectFrom("meetings").selectAll().where("id", "=", id).executeTakeFirst();
+  if (!meeting) {
+    return null;
+  }
+  if (meeting.title === normalizedTitle) {
+    return toMeeting(meeting);
+  }
+
+  const oldFolder = meetingsDir
+    ? meetingPaths(meetingsDir, meeting.start_time, meeting.title, meeting.id).folder
+    : null;
+  const newFolder = meetingsDir
+    ? meetingPaths(meetingsDir, meeting.start_time, normalizedTitle, meeting.id).folder
+    : null;
+  const movedFolder = Boolean(oldFolder && newFolder && oldFolder !== newFolder && existsSync(oldFolder));
+
+  if (movedFolder) {
+    if (existsSync(newFolder!)) {
+      throw new Error("Meeting folder already exists");
+    }
+    await rename(oldFolder!, newFolder!);
+  }
+
+  try {
+    const result = await db
+      .updateTable("meetings")
+      .set({ title: normalizedTitle, updated_at: Date.now() })
+      .where("id", "=", id)
+      .where("title", "=", meeting.title)
+      .executeTakeFirst();
+
+    if (Number(result.numUpdatedRows) !== 1) {
+      throw new Error("Meeting was changed while it was being renamed");
+    }
+  } catch (error) {
+    if (movedFolder) {
+      await rename(newFolder!, oldFolder!).catch(() => undefined);
+    }
+    throw error;
+  }
 
   const row = await db.selectFrom("meetings").selectAll().where("id", "=", id).executeTakeFirst();
   return row ? toMeeting(row) : null;

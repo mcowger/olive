@@ -1652,15 +1652,15 @@ function MeetingDetailView({
 
       {detail && (
         <div className="space-y-8">
-          <header className="flex flex-col gap-4 border-b border-stone-800 pb-6 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0">
+          <header className="space-y-4 border-b border-stone-800 pb-6">
+            <div className="w-full">
               {editingTitle ? (
                 <form
                   onSubmit={(event) => {
                     event.preventDefault();
                     void saveTitle();
                   }}
-                  className="flex flex-wrap items-center gap-2"
+                  className="w-full"
                 >
                   <input
                     type="text"
@@ -1672,80 +1672,85 @@ function MeetingDetailView({
                     aria-label="Meeting title"
                     autoFocus
                     disabled={savingTitle}
-                    className="min-w-0 flex-1 rounded-lg border border-lime-400/50 bg-stone-900 px-3 py-1.5 text-2xl font-bold tracking-tight text-stone-100 focus:border-lime-400 focus:outline-none sm:text-3xl"
+                    className="w-full rounded-lg border border-lime-400/50 bg-stone-900 px-3 py-1.5 text-2xl font-bold tracking-tight text-stone-100 focus:border-lime-400 focus:outline-none sm:text-3xl"
                   />
-                  <button
-                    type="submit"
-                    disabled={savingTitle}
-                    className="rounded-lg bg-lime-400 px-3 py-1.5 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-50"
-                  >
-                    {savingTitle ? "Saving…" : "Save"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditingTitle(false)}
-                    disabled={savingTitle}
-                    className="rounded-lg border border-stone-700 px-3 py-1.5 text-sm text-stone-300 transition hover:border-stone-500 hover:text-stone-100 disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="submit"
+                      disabled={savingTitle}
+                      className="rounded-lg bg-lime-400 px-3 py-1.5 text-sm font-semibold text-stone-950 transition hover:bg-lime-300 disabled:opacity-50"
+                    >
+                      {savingTitle ? "Saving…" : "Save"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingTitle(false)}
+                      disabled={savingTitle}
+                      className="rounded-lg border border-stone-700 px-3 py-1.5 text-sm text-stone-300 transition hover:border-stone-500 hover:text-stone-100 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </form>
               ) : (
-                <div className="flex items-start gap-2">
+                <>
                   <h1 className="text-2xl sm:text-3xl font-bold tracking-tight break-words">{detail.meeting.title}</h1>
                   <button
                     type="button"
                     onClick={startRename}
-                    className="mt-1 rounded-md px-1.5 py-1 text-stone-500 transition hover:bg-stone-800 hover:text-lime-300"
+                    className="mt-2 rounded-md px-1.5 py-1 text-stone-500 transition hover:bg-stone-800 hover:text-lime-300"
                     aria-label="Rename meeting"
                     title="Rename meeting"
                   >
                     ✎
                   </button>
-                </div>
+                </>
               )}
-              <div className="mt-2 flex flex-wrap items-center gap-2 sm:gap-3 text-xs sm:text-sm text-stone-400">
-                <span>{formatDate(detail.meeting.startTime)}</span>
-                <span>•</span>
-                <span>{formatDuration(detail.meeting.endTime - detail.meeting.startTime)}</span>
-                <span>•</span>
-                <span className="capitalize">{detail.meeting.source}</span>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                {detail.meeting.tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-stone-700 bg-stone-800/80 pl-2.5 pr-1.5 py-1 text-xs text-stone-200"
-                  >
-                    {tag}
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveTag(tag)}
-                      disabled={savingTags}
-                      className="text-stone-500 hover:text-rose-400 transition disabled:opacity-50"
-                      aria-label={`Remove tag ${tag}`}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-                <input
-                  type="text"
-                  value={newTagInput}
-                  onChange={(e) => setNewTagInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      handleAddTag();
-                    }
-                  }}
-                  placeholder="+ Add tag"
-                  disabled={savingTags}
-                  className="w-24 rounded-full border border-dashed border-stone-700 bg-transparent px-2.5 py-1 text-xs text-stone-200 placeholder:text-stone-500 focus:w-32 focus:border-lime-400 focus:outline-none transition-all disabled:opacity-50"
-                />
-              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs sm:text-sm text-stone-400">
+                  <span>{formatDate(detail.meeting.startTime)}</span>
+                  <span>•</span>
+                  <span>{formatDuration(detail.meeting.endTime - detail.meeting.startTime)}</span>
+                  <span>•</span>
+                  <span className="capitalize">{detail.meeting.source}</span>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                  {detail.meeting.tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-stone-700 bg-stone-800/80 pl-2.5 pr-1.5 py-1 text-xs text-stone-200"
+                    >
+                      {tag}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveTag(tag)}
+                        disabled={savingTags}
+                        className="text-stone-500 hover:text-rose-400 transition disabled:opacity-50"
+                        aria-label={`Remove tag ${tag}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    type="text"
+                    value={newTagInput}
+                    onChange={(e) => setNewTagInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddTag();
+                      }
+                    }}
+                    placeholder="+ Add tag"
+                    disabled={savingTags}
+                    className="w-24 rounded-full border border-dashed border-stone-700 bg-transparent px-2.5 py-1 text-xs text-stone-200 placeholder:text-stone-500 focus:w-32 focus:border-lime-400 focus:outline-none transition-all disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
               <button
                 type="button"
                 onClick={() => setShowChatPanel(true)}
@@ -1834,6 +1839,7 @@ function MeetingDetailView({
                 </svg>
                 <span>Delete</span>
               </button>
+            </div>
             </div>
           </header>
 

@@ -1,4 +1,4 @@
-import { rmSync } from "node:fs";
+import { cpSync, rmSync } from "node:fs";
 
 export {};
 
@@ -43,6 +43,21 @@ try {
       console.error(log);
     }
     process.exitCode = 1;
+  } else {
+    for (const asset of [
+      "apple-touch-icon.png",
+      "favicon-128x128.png",
+      "favicon-16x16.png",
+      "favicon-32x32.png",
+      "favicon-48x48.png",
+      "favicon-64x64.png",
+      "favicon.ico",
+      "icon-192x192.png",
+      "icon-512x512.png",
+      "site.webmanifest"
+    ]) {
+      cpSync(`packages/web/src/${asset}`, `packages/web/dist/${asset}`);
+    }
   }
 } catch (err) {
   console.error(err);

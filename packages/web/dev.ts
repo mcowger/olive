@@ -1,6 +1,19 @@
+import { join } from "node:path";
 import homepage from "./src/index.html";
 
 const generatedCss = "src/styles.generated.css";
+const staticAssetNames = new Set([
+  "apple-touch-icon.png",
+  "favicon-128x128.png",
+  "favicon-16x16.png",
+  "favicon-32x32.png",
+  "favicon-48x48.png",
+  "favicon-64x64.png",
+  "favicon.ico",
+  "icon-192x192.png",
+  "icon-512x512.png",
+  "site.webmanifest"
+]);
 const tailwind = Bun.spawnSync([
   "bun",
   "run",
@@ -57,6 +70,11 @@ Bun.serve({
     if (url.pathname.startsWith("/api/")) {
       const target = new URL(`${url.pathname}${url.search}`, apiOrigin);
       return fetch(new Request(target, request));
+    }
+
+    const assetName = url.pathname.slice(1);
+    if (staticAssetNames.has(assetName)) {
+      return new Response(Bun.file(join(import.meta.dir, "src", assetName)));
     }
 
     return homepage;

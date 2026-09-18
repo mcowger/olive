@@ -133,7 +133,8 @@ const ADDITIVE_COLUMNS = [
   ["stage_runs", "last_error", "TEXT"],
   ["stage_runs", "started_at", "INTEGER"],
   ["stage_runs", "finished_at", "INTEGER"],
-  ["plaud_ingest_state", "pcs_resolved", "INTEGER NOT NULL DEFAULT 0"]
+  ["plaud_ingest_state", "pcs_resolved", "INTEGER NOT NULL DEFAULT 0"],
+  ["plaud_ingest_state", "duplicate_of_meeting_id", "TEXT REFERENCES meetings(id)"]
 ] as const;
 
 function addColumnIfMissing(db: BunDatabase, table: string, column: string, definition: string): void {

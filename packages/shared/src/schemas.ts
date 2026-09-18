@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const meetingSourceSchema = z.enum(["plaud", "upload", "ios-shortcut"]);
-export const meetingStatusSchema = z.enum(["pending", "processing", "ready", "error"]);
+export const meetingStatusSchema = z.enum(["pending", "processing", "ready", "error", "duplicate"]);
 export const artifactKindSchema = z.enum(["transcript", "summary"]);
 export const artifactFormatSchema = z.enum(["md", "txt", "json", "srt"]);
 export const stageRunStatusSchema = z.enum(["pending", "running", "done", "error"]);

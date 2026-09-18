@@ -81,6 +81,20 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Thrown when a Plaud recording's downloaded audio hash matches a recording
+ * already stored under a different meeting. This is not a transient failure:
+ * it means the file has already been ingested (typically from a past
+ * re-processing / re-ID event) and must be permanently skipped rather than
+ * retried on every poll cycle.
+ */
+export class DuplicateAudioError extends Error {
+  constructor(public readonly duplicateOfMeetingId: string) {
+    super(`Audio hash already belongs to meeting ${duplicateOfMeetingId}`);
+    this.name = "DuplicateAudioError";
+  }
+}
+
 function parseTimestamp(value: string | null | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -445,6 +459,15 @@ export class PlaudPoller {
     const errors: string[] = [];
 
     for (const state of states) {
+      // Known duplicates are marked permanently resolved as soon as they're
+      // detected (see the catch block below), so this branch should be
+      // unreachable in normal operation. It stays as a defensive, local
+      // (no-network) guard against ever re-fetching an asset we already know
+      // is a duplicate, in case a state row is ever left inconsistent.
+      if (state.duplicate_of_meeting_id) {
+        continue;
+      }
+
       const meeting = await this.db
         .selectFrom("meetings")
         .selectAll()
@@ -469,6 +492,12 @@ export class PlaudPoller {
           resolved += 1;
         }
       } catch (error) {
+        if (error instanceof DuplicateAudioError) {
+          await this.markDuplicate(meeting, state, error.duplicateOfMeetingId);
+          resolved += 1;
+          continue;
+        }
+
         const message = errorMessage(error);
         errors.push(`${state.plaud_file_id}: ${message}`);
         await this.db
@@ -623,7 +652,7 @@ export class PlaudPoller {
       .executeTakeFirst();
     if (existingByHash) {
       if (existingByHash.meeting_id !== meeting.id) {
-        throw new Error(`Audio hash already belongs to meeting ${existingByHash.meeting_id}`);
+        throw new DuplicateAudioError(existingByHash.meeting_id);
       }
 
       if (!existing) {
@@ -679,6 +708,39 @@ export class PlaudPoller {
       .execute();
 
     return { id: recordingId, path: relativePath };
+  }
+
+  /**
+   * Permanently marks a meeting's Plaud ingest state as resolved because its
+   * audio is a byte-for-byte duplicate of a recording already owned by
+   * another meeting (typically left over from a past re-processing / re-ID
+   * event). This stops the poller from ever re-fetching or re-downloading
+   * this asset on subsequent cycles: `fetchPendingAssets` only selects rows
+   * where `pcs_resolved = 0`, so once this is set the meeting is skipped
+   * entirely, with no network call, on every future poll.
+   */
+  private async markDuplicate(meeting: MeetingRow, state: PlaudIngestStateRow, duplicateOfMeetingId: string): Promise<void> {
+    const resolvedAt = this.now();
+    await this.db
+      .updateTable("plaud_ingest_state")
+      .set({ pcs_resolved: 1, duplicate_of_meeting_id: duplicateOfMeetingId })
+      .where("meeting_id", "=", meeting.id)
+      .execute();
+    await this.db
+      .updateTable("meetings")
+      .set({
+        status: "duplicate",
+        last_error: `Duplicate of meeting ${duplicateOfMeetingId}: audio already ingested under another meeting`,
+        updated_at: resolvedAt
+      })
+      .where("id", "=", meeting.id)
+      .execute();
+    this.logger.warn("Skipping duplicate Plaud recording; audio already ingested under another meeting", {
+      category: "plaud",
+      meetingId: meeting.id,
+      plaudFileId: state.plaud_file_id,
+      duplicateOfMeetingId
+    });
   }
 
   private async downloadAudio(detail: FileDetail): Promise<DownloadedAudio> {

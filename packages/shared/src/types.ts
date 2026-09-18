@@ -1,7 +1,7 @@
 import type { Generated, Insertable, Selectable, Updateable } from "kysely";
 
 export type MeetingSource = "plaud" | "upload" | "ios-shortcut";
-export type MeetingStatus = "pending" | "processing" | "ready" | "error";
+export type MeetingStatus = "pending" | "processing" | "ready" | "error" | "duplicate";
 export type ArtifactKind = "transcript" | "summary";
 export type ArtifactFormat = "md" | "txt" | "json" | "srt";
 
@@ -79,6 +79,7 @@ export interface PlaudIngestStateTable {
   first_seen_at: number;
   pcs_deadline_at: number;
   pcs_resolved: Generated<number>;
+  duplicate_of_meeting_id: string | null;
 }
 
 export interface SyncStateTable {

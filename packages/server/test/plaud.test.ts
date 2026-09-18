@@ -216,6 +216,85 @@ describe("Plaud poller", () => {
     await closeDatabase(handle);
     await rm(meetingsDir, { recursive: true, force: true });
   });
+
+  test("permanently skips a duplicate-audio meeting instead of re-downloading it every cycle", async () => {
+    // Regression test for a busy-loop bug: a meeting whose audio hash collided
+    // with an already-ingested recording under a different meetingId used to
+    // stay unresolved forever, so every poll cycle re-fetched and re-downloaded
+    // its (redundant) audio over the network, forever.
+    const handle = createDb(":memory:");
+    const meetingsDir = await mkdtemp(join(import.meta.dir, "plaud-duplicate-"));
+
+    const DUPLICATE_FILE: FileSummary = {
+      id: "plaud-file-duplicate",
+      name: "Re-ID'd duplicate",
+      created_at: "2026-08-11T11:00:00.000Z",
+      start_at: "2026-08-11T11:00:00.000Z",
+      duration: 12,
+      serial_number: "fixture-device"
+    };
+    const details: Record<string, FileDetail> = {
+      [FIXTURE_FILE.id]: readyDetail(),
+      [DUPLICATE_FILE.id]: { ...readyDetail(), ...DUPLICATE_FILE, presigned_url: "https://audio.test/duplicate.m4a" }
+    };
+
+    let downloadCalls = 0;
+    const client: PlaudClientLike = {
+      oauth: createFakeClient(readyDetail()).oauth,
+      getCurrentUser: async () => ({ id: "fake-user" }),
+      listFilesIterator: async function* () {
+        yield FIXTURE_FILE;
+        yield DUPLICATE_FILE;
+      },
+      getFile: async (id: string) => details[id]
+    };
+    const countingFetch = (fetchImpl: (input: string) => Promise<Response>) => {
+      return async (input: string) => {
+        downloadCalls += 1;
+        return fetchImpl(input);
+      };
+    };
+    const poller = new PlaudPoller({
+      db: handle.db,
+      meetingsDir,
+      client,
+      fetchImpl: countingFetch(fakeFetch()),
+      now: () => 1_000_000
+    });
+
+    const first = await poller.trigger();
+    expect(first.discovered).toBe(2);
+    // Both files' audio is byte-identical (fakeFetch always returns AUDIO_BYTES),
+    // so exactly one recording gets created and the second collides on hash.
+    expect(downloadCalls).toBe(2);
+
+    const meetings = await handle.db.selectFrom("meetings").selectAll().orderBy("created_at").execute();
+    const original = meetings.find((m) => m.title === FIXTURE_FILE.name)!;
+    const duplicate = meetings.find((m) => m.title === DUPLICATE_FILE.name)!;
+    expect(original.status).toBe("ready");
+    expect(duplicate.status).toBe("duplicate");
+
+    const duplicateState = await handle.db
+      .selectFrom("plaud_ingest_state")
+      .selectAll()
+      .where("meeting_id", "=", duplicate.id)
+      .executeTakeFirstOrThrow();
+    expect(duplicateState.pcs_resolved).toBe(1);
+    expect(duplicateState.duplicate_of_meeting_id).toBe(original.id);
+    expect(await handle.db.selectFrom("recordings").selectAll().execute()).toHaveLength(1);
+
+    // Sanity check: the duplicate must never be retried, on this cycle or later ones.
+    const second = await poller.trigger();
+    const third = await poller.trigger();
+    expect(second.discovered).toBe(0);
+    expect(second.resolved).toBe(0);
+    expect(third.resolved).toBe(0);
+    expect(downloadCalls).toBe(2);
+    expect(await handle.db.selectFrom("plaud_ingest_state").select(({ fn }) => fn.count<number>("meeting_id").as("count")).where("pcs_resolved", "=", 0).executeTakeFirst()).toEqual({ count: 0 });
+
+    await closeDatabase(handle);
+    await rm(meetingsDir, { recursive: true, force: true });
+  });
 });
 
 describe("Plaud API", () => {
